@@ -342,6 +342,13 @@ local function run_render(current_format)
             tostring(start_time) .. "," .. tostring(end_time)
         }
 
+        local aid = mp.get_property_number("aid")
+        if aid then
+            table.insert(args, "-a")
+            table.insert(args, tostring(aid - 1))
+            print("smartcut: Currently playing audio track: " .. aid .. " (0-based index: " .. (aid - 1) .. ")")
+        end
+
         mp.command_native_async({
             name = "subprocess",
             playback_only = false,
