@@ -230,6 +230,8 @@ end
 local function get_format_desc(fmt)
     if fmt == "smartcut" then
         return "Lossless Keyframe Cut"
+    elseif fmt == "smartcut_mp4" then
+        return "Lossless Keyframe Cut (MP4)"
     elseif fmt == "mp4" then
         return "MP4 Video (H.264, CRF " .. opts.crf .. ")"
     elseif fmt == "gif" then
@@ -311,18 +313,23 @@ local function run_render(current_format)
 
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
 
-    if current_format == "smartcut" then
+    if current_format == "smartcut" or current_format == "smartcut_mp4" then
         if has_crop then
             mp.osd_message("Error: smartcut (lossless) does not support cropping!\nOpen menu (" .. opts.menu_key .. ") to choose MP4/GIF/AVIF.", 5)
             return
         end
 
-        local ext = input_path:match("^.+(%.[^.]+)$") or ".mkv"
+        local ext
+        if current_format == "smartcut_mp4" then
+            ext = ".mp4"
+        else
+            ext = input_path:match("^.+(%.[^.]+)$") or ".mkv"
+        end
         local output_dir = resolve_path(opts.output_dir)
         local filename = os.date(opts.filename_template) .. ext
         local output_path = output_dir .. "/" .. filename
 
-        mp.osd_message("Creating lossless clip (smartcut)...\n" .. format_time(start_time) .. " - " .. format_time(end_time), 3)
+        mp.osd_message("Creating lossless clip (" .. current_format .. ")...\n" .. format_time(start_time) .. " - " .. format_time(end_time), 3)
         print("smartcut: Running smartcut...")
         print("smartcut: Input: " .. input_path)
         print("smartcut: Output: " .. output_path)
@@ -568,6 +575,7 @@ local function draw_menu()
     
     if has_crop then
         ass = ass .. "{\\1c&H666666&}      [SMARTCUT] (Disabled - cropping active){\\1c&HFFFFFF&}\\N"
+        ass = ass .. "{\\1c&H666666&}      [SMARTCUT_MP4] (Disabled - cropping active){\\1c&HFFFFFF&}\\N"
     end
     
     ass = ass .. "\\N{\\fs14\\1c&H888888&}[Up/Down] Navigate   [Enter] Confirm & Render   [Esc/" .. opts.menu_key .. "] Close Menu{\\1c&HFFFFFF&}"
@@ -638,7 +646,7 @@ local function toggle_menu()
             end
         end
     else
-        menu_options = {"smartcut", "mp4", "gif", "avif"}
+        menu_options = {"smartcut", "smartcut_mp4", "mp4", "gif", "avif"}
         menu_sel = 1
         local def = opts.default_cut_mode:lower()
         for i, opt in ipairs(menu_options) do
@@ -676,7 +684,7 @@ local function make_clip()
     local target_format
     if has_crop then
         target_format = opts.default_crop_mode:lower()
-        if target_format == "smartcut" then
+        if target_format == "smartcut" or target_format == "smartcut_mp4" then
             target_format = "mp4"
         end
     else
