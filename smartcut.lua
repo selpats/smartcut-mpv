@@ -14,25 +14,39 @@ local opts = {
     menu_key = "n",
     
     default_cut_mode = "smartcut",
-    default_crop_mode = "mp4",
-    
-    -- MP4 settings
-    vcodec = "libx264",
-    crf = "18",
-    vpreset_mp4 = "medium",
-    acodec = "copy",
-    
-    -- AVIF settings
-    crf_avif = "30",
-    vpreset_avif = "6",
-    
-    -- GIF settings
-    gif_fps = "15",
-    gif_scale = "-1"
+    default_crop_mode = "mp4"
 }
 
 -- Load config from script-opts/smartcut.conf
 options.read_options(opts, "smartcut")
+
+local profiles = {}
+local user_profiles_file = mp.command_native({"expand-path", "~~/script-opts/smartcut_profiles.json"})
+local repo_profiles_file = mp.get_script_directory() .. "/smartcut_profiles.json"
+
+local function load_profiles()
+    local f = io.open(user_profiles_file, "r")
+    
+    -- If user config doesn't exist in script-opts, read from the script directory
+    if not f then
+        f = io.open(repo_profiles_file, "r")
+    end
+    
+    if f then
+        local content = f:read("*all")
+        f:close()
+        local parsed, err = utils.parse_json(content)
+        if parsed then
+            profiles = parsed
+        else
+            print("smartcut: Failed to parse JSON profiles: " .. tostring(err))
+        end
+    else
+        print("smartcut: Error: Could not find smartcut_profiles.json!")
+    end
+end
+
+load_profiles()
 
 local start_time = nil
 local end_time = nil
@@ -286,24 +300,6 @@ local function mark_time()
     end
 end
 
--- Formats description helper
-local function get_format_desc(fmt)
-    if fmt == "smartcut" then
-        return "Lossless Keyframe Cut"
-    elseif fmt == "smartcut_mp4" then
-        return "Lossless Keyframe Cut (MP4)"
-    elseif fmt == "mp4" then
-        return "MP4 Video (H.264, CRF " .. opts.crf .. ")"
-    elseif fmt == "gif" then
-        return "GIF Animation (" .. opts.gif_fps .. " fps)"
-    elseif fmt == "avif" then
-        return "AVIF Video (SVT-AV1, CRF " .. opts.crf_avif .. ")"
-    else
-        return ""
-    end
-end
-
--- Escape path characters for FFmpeg filtergraph syntax (Windows compatibility)
 local function escape_filter_path(path)
     -- Normalize backslashes to forward slashes to avoid escaping issues
     path = path:gsub("\\", "/")
@@ -392,7 +388,16 @@ local function get_active_sub_info()
 end
 
 -- Actual render execution logic
-local function run_render(current_format)
+local function run_render(profile_id)
+    local profile = nil
+    for _, p in ipairs(profiles) do
+        if p.id == profile_id then profile = p; break end
+    end
+    if not profile then
+        mp.osd_message("Error: Profile not found", 3)
+        return
+    end
+
     local input_path = mp.get_property("path")
     if not input_path or input_path == "" then
         mp.osd_message("Error: No file currently playing", 3)
@@ -409,23 +414,23 @@ local function run_render(current_format)
 
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
 
-    if current_format == "smartcut" or current_format == "smartcut_mp4" then
-        if has_crop then
-            mp.osd_message("Error: smartcut (lossless) does not support cropping!\nOpen menu (" .. opts.menu_key .. ") to choose MP4/GIF/AVIF.", 5)
+    if profile.type == "smartcut" then
+        if has_crop and not profile.supports_crop then
+            mp.osd_message("Error: " .. profile.name .. " does not support cropping!\nOpen menu (" .. opts.menu_key .. ") to choose a compatible format.", 5)
             return
         end
 
-        local ext
-        if current_format == "smartcut_mp4" then
-            ext = ".mp4"
-        else
+        local ext = profile.ext
+        if ext == "auto" then
             ext = input_path:match("^.+(%.[^.]+)$") or ".mkv"
+        else
+            ext = "." .. ext
         end
         local output_dir = resolve_path(opts.output_dir)
         local filename = os.date(opts.filename_template) .. ext
         local output_path = output_dir .. "/" .. filename
 
-        mp.osd_message("Creating lossless clip (" .. current_format .. ")...\n" .. format_time(start_time) .. " - " .. format_time(end_time), 3)
+        mp.osd_message("Creating lossless clip (" .. profile.name .. ")...\n" .. format_time(start_time) .. " - " .. format_time(end_time), 3)
         print("smartcut: Running smartcut...")
         print("smartcut: Input: " .. input_path)
         print("smartcut: Output: " .. output_path)
@@ -466,7 +471,7 @@ local function run_render(current_format)
                 print("smartcut: Lossless cut failed. Status: " .. (result and result.status or "nil") .. ", Error: " .. (error or "nil"))
             end
         end)
-    else
+    elseif profile.type == "ffmpeg" then
         -- FFmpeg crop or encode
         local rect = nil
         local crop_w, crop_h, crop_x, crop_y = nil, nil, nil, nil
@@ -493,14 +498,14 @@ local function run_render(current_format)
         end
 
         local output_dir = resolve_path(opts.output_dir)
-        local filename = os.date(opts.filename_template) .. "." .. current_format
+        local filename = os.date(opts.filename_template) .. "." .. profile.ext
         local output_path = output_dir .. "/" .. filename
 
         -- Check for active subtitles to burn in
         local sub_info = get_active_sub_info()
 
         if has_crop then
-            local msg = "Rendering cropped " .. current_format:upper() .. " clip...\n(Trimming & Re-encoding"
+            local msg = "Rendering cropped clip (" .. profile.name .. ")...\n(Trimming & Re-encoding"
             if sub_info then
                 msg = msg .. " + Subtitles"
             end
@@ -509,7 +514,7 @@ local function run_render(current_format)
             print("smartcut: Running crop...")
             print("smartcut: Crop filter: crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
         else
-            local msg = "Rendering full " .. current_format:upper() .. " clip...\n(Trimming & Re-encoding"
+            local msg = "Rendering full clip (" .. profile.name .. ")...\n(Trimming & Re-encoding"
             if sub_info then
                 msg = msg .. " + Subtitles"
             end
@@ -517,7 +522,7 @@ local function run_render(current_format)
             mp.osd_message(msg, 5)
             print("smartcut: Running encode (no crop)...")
         end
-        print("smartcut: Format: " .. current_format)
+        print("smartcut: Format: " .. profile.name)
         print("smartcut: Input: " .. input_path)
         print("smartcut: Output: " .. output_path)
 
@@ -540,96 +545,49 @@ local function run_render(current_format)
             table.insert(args, "-map")
             table.insert(args, "0:" .. ff_video_idx)
         end
-        if current_format == "mp4" and ff_audio_idx then
+        if ff_audio_idx and profile.audio_args and #profile.audio_args > 0 then
             table.insert(args, "-map")
             table.insert(args, "0:" .. ff_audio_idx)
         end
 
         -- Format specific arguments
-        if current_format == "mp4" then
-            local vf_items = {}
-            if has_crop then
-                table.insert(vf_items, "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
-            end
-            if sub_info then
-                local sub_filter = ""
-                if sub_info.external then
-                    sub_filter = "subtitles='" .. escape_filter_path(sub_info.filename) .. "'"
-                else
-                    sub_filter = "subtitles='" .. escape_filter_path(input_path) .. "':si=" .. sub_info.si
-                end
-                table.insert(vf_items, sub_filter)
-            end
-            if #vf_items > 0 then
-                table.insert(args, "-vf")
-                table.insert(args, table.concat(vf_items, ","))
-            end
-            table.insert(args, "-c:v")
-            table.insert(args, opts.vcodec)
-            table.insert(args, "-crf")
-            table.insert(args, opts.crf)
-            table.insert(args, "-preset")
-            table.insert(args, opts.vpreset_mp4)
-            table.insert(args, "-c:a")
-            table.insert(args, opts.acodec)
-        elseif current_format == "gif" then
-            -- Build customizable GIF filtergraph
-            local vf_items = {}
-            if has_crop then
-                table.insert(vf_items, "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
-            end
-            if sub_info then
-                local sub_filter = ""
-                if sub_info.external then
-                    sub_filter = "subtitles='" .. escape_filter_path(sub_info.filename) .. "'"
-                else
-                    sub_filter = "subtitles='" .. escape_filter_path(input_path) .. "':si=" .. sub_info.si
-                end
-                table.insert(vf_items, sub_filter)
-            end
-            if opts.gif_fps ~= "" and opts.gif_fps ~= "-1" then
-                table.insert(vf_items, "fps=" .. opts.gif_fps)
-            end
-            if opts.gif_scale ~= "" and opts.gif_scale ~= "-1" then
-                table.insert(vf_items, "scale=" .. opts.gif_scale .. ":-1")
-            end
-            
-            local base_vf = table.concat(vf_items, ",")
-            local gif_vf = ""
-            if base_vf ~= "" then
-                gif_vf = base_vf .. ",split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
+        local vf_items = {}
+        if profile.vf_prefix and profile.vf_prefix ~= "" then
+            table.insert(vf_items, profile.vf_prefix)
+        end
+        
+        if has_crop then
+            table.insert(vf_items, "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
+        end
+        if sub_info then
+            local sub_filter = ""
+            if sub_info.external then
+                sub_filter = "subtitles='" .. escape_filter_path(sub_info.filename) .. "'"
             else
-                gif_vf = "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
+                sub_filter = "subtitles='" .. escape_filter_path(input_path) .. "':si=" .. sub_info.si
             end
-            
+            table.insert(vf_items, sub_filter)
+        end
+        
+        if profile.vf_suffix and profile.vf_suffix ~= "" then
+            table.insert(vf_items, profile.vf_suffix)
+        end
+        
+        if #vf_items > 0 then
             table.insert(args, "-vf")
-            table.insert(args, gif_vf)
-            table.insert(args, "-an")
-        elseif current_format == "avif" then
-            local vf_items = {}
-            if has_crop then
-                table.insert(vf_items, "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
+            table.insert(args, table.concat(vf_items, ","))
+        end
+
+        if profile.video_args then
+            for _, arg in ipairs(profile.video_args) do
+                table.insert(args, arg)
             end
-            if sub_info then
-                local sub_filter = ""
-                if sub_info.external then
-                    sub_filter = "subtitles='" .. escape_filter_path(sub_info.filename) .. "'"
-                else
-                    sub_filter = "subtitles='" .. escape_filter_path(input_path) .. "':si=" .. sub_info.si
-                end
-                table.insert(vf_items, sub_filter)
+        end
+        
+        if profile.audio_args then
+            for _, arg in ipairs(profile.audio_args) do
+                table.insert(args, arg)
             end
-            if #vf_items > 0 then
-                table.insert(args, "-vf")
-                table.insert(args, table.concat(vf_items, ","))
-            end
-            table.insert(args, "-c:v")
-            table.insert(args, "libsvtav1")
-            table.insert(args, "-crf")
-            table.insert(args, opts.crf_avif)
-            table.insert(args, "-preset")
-            table.insert(args, opts.vpreset_avif)
-            table.insert(args, "-an")
         end
 
         table.insert(args, output_path)
@@ -640,7 +598,7 @@ local function run_render(current_format)
             args = args
         }, function(success, result, error)
             if success and result and result.status == 0 then
-                mp.osd_message(current_format:upper() .. " clip created successfully!\nSaved to: " .. filename, 5)
+                mp.osd_message(profile.id:upper() .. " clip created successfully!\nSaved to: " .. filename, 5)
                 print("smartcut: Crop/Cut completed successfully.")
                 
                 -- Reset markers and overlay
@@ -665,7 +623,6 @@ local function run_render(current_format)
         end)
     end
 end
-
 -- OSD Menu Drawing function
 local function draw_menu()
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
@@ -689,21 +646,29 @@ local function draw_menu()
     end
     
     -- Options
-    for i, opt in ipairs(menu_options) do
-        local desc = get_format_desc(opt)
+    for i, opt_id in ipairs(menu_options) do
+        local profile = nil
+        for _, p in ipairs(profiles) do
+            if p.id == opt_id then profile = p; break end
+        end
+        local desc = profile and profile.name or opt_id
+
         if i == menu_sel then
             -- Selected item: Cyan accent, bold
-            ass = ass .. "{\\fs26\\1c&HFFDD00&\\b1}▶  " .. opt:upper() .. "  {\\fs18\\1c&HDDDDDD&\\b0}" .. desc .. "{\\1c&HFFFFFF&}\\N"
+            ass = ass .. "{\\fs26\\1c&HFFDD00&\\b1}▶  " .. opt_id:upper() .. "  {\\fs18\\1c&HDDDDDD&\\b0}" .. desc .. "{\\1c&HFFFFFF&}\\N"
         else
             -- Unselected item: White
-            ass = ass .. "{\\fs24\\1c&HFFFFFF&}    " .. opt:upper() .. "  {\\fs16\\1c&H888888&}" .. desc .. "{\\1c&HFFFFFF&}\\N"
+            ass = ass .. "{\\fs24\\1c&HFFFFFF&}    " .. opt_id:upper() .. "  {\\fs16\\1c&H888888&}" .. desc .. "{\\1c&HFFFFFF&}\\N"
         end
     end
     
     -- Show disabled options if cropping
     if has_crop then
-        ass = ass .. "{\\fs18\\1c&H555555&}    SMARTCUT  (Requires Full-Frame)\\N"
-        ass = ass .. "{\\fs18\\1c&H555555&}    SMARTCUT_MP4  (Requires Full-Frame)\\N"
+        for _, p in ipairs(profiles) do
+            if not p.supports_crop then
+                ass = ass .. "{\\fs18\\1c&H555555&}    " .. p.id:upper() .. "  (Requires Full-Frame)\\N"
+            end
+        end
     end
     
     -- Footer controls
@@ -712,7 +677,6 @@ local function draw_menu()
     menu_overlay.data = ass
     menu_overlay:update()
 end
-
 local function close_menu()
     mp.remove_key_binding("menu-up")
     mp.remove_key_binding("menu-down")
@@ -764,25 +728,26 @@ local function toggle_menu()
 
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
     
+    menu_options = {}
     if has_crop then
-        menu_options = {"mp4", "gif", "avif"}
-        menu_sel = 1
         local def = opts.default_crop_mode:lower()
-        for i, opt in ipairs(menu_options) do
-            if opt == def then
-                menu_sel = i
-                break
+        for _, p in ipairs(profiles) do
+            if p.supports_crop then
+                table.insert(menu_options, p.id)
             end
         end
-    else
-        menu_options = {"smartcut", "smartcut_mp4", "mp4", "gif", "avif"}
         menu_sel = 1
-        local def = opts.default_cut_mode:lower()
         for i, opt in ipairs(menu_options) do
-            if opt == def then
-                menu_sel = i
-                break
-            end
+            if opt == def then menu_sel = i; break end
+        end
+    else
+        local def = opts.default_cut_mode:lower()
+        for _, p in ipairs(profiles) do
+            table.insert(menu_options, p.id)
+        end
+        menu_sel = 1
+        for i, opt in ipairs(menu_options) do
+            if opt == def then menu_sel = i; break end
         end
     end
 
