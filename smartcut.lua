@@ -127,26 +127,46 @@ local function screen_to_video(sx, sy, rect)
 end
 
 local function draw_crop_box(x1, y1, x2, y2)
-    local min_x = math.min(x1, x2)
-    local max_x = math.max(x1, x2)
-    local min_y = math.min(y1, y2)
-    local max_y = math.max(y1, y2)
+    local min_x = math.floor(math.min(x1, x2))
+    local max_x = math.floor(math.max(x1, x2))
+    local min_y = math.floor(math.min(y1, y2))
+    local max_y = math.floor(math.max(y1, y2))
     
     local box_w = max_x - min_x
     local box_h = max_y - min_y
     
     local w, h = mp.get_osd_size()
-    if w and h then
-        overlay.res_x = w
-        overlay.res_y = h
+    if not w or not h or w == 0 or h == 0 then return end
+    
+    overlay.res_x = w
+    overlay.res_y = h
+    
+    -- 1. Dimmed background (dark overlay with a hole for the crop area)
+    local dim_ass = string.format(
+        "{\\an7\\pos(0,0)\\1c&H000000&\\1a&H88&\\bord0\\iclip(%d,%d,%d,%d)\\p1}m 0 0 l %d 0 l %d %d l 0 %d l 0 0{\\p0}",
+        min_x, min_y, max_x, max_y,
+        w, w, h, h
+    )
+    
+    -- 2. Clean, sharp border (drawn by filling the box area and clipping out the inside)
+    local bt = math.max(2, math.floor(h / 400)) -- Dynamic border thickness
+    local border_ass = ""
+    
+    if box_w > bt * 2 and box_h > bt * 2 then
+        border_ass = string.format(
+            "{\\an7\\pos(%d,%d)\\1c&HFFDD00&\\1a&H00&\\bord0\\iclip(%d,%d,%d,%d)\\p1}m 0 0 l %d 0 l %d %d l 0 %d l 0 0{\\p0}",
+            min_x, min_y,
+            min_x + bt, min_y + bt, max_x - bt, max_y - bt,
+            box_w, box_w, box_h, box_h
+        )
     end
     
-    -- Draw empty red box (transparent fill, red border)
-    local ass_data = string.format(
-        "{\\an7\\pos(%d,%d)\\bord2\\3c&H0000FF&\\1a&HFF&\\3a&H00&\\p1}m 0 0 l %d 0 l %d %d l 0 %d l 0 0{\\p0}",
-        min_x, min_y, box_w, box_w, box_h, box_h
-    )
-    overlay.data = ass_data
+    if border_ass ~= "" then
+        overlay.data = dim_ass .. "\n" .. border_ass
+    else
+        overlay.data = dim_ass
+    end
+    
     overlay:update()
 end
 
@@ -156,37 +176,73 @@ local function mouse_move()
     draw_crop_box(drag_start_x, drag_start_y, mx, my)
 end
 
+local function set_osc_visibility(mode)
+    local current_level = mp.get_property("osd-level")
+    mp.set_property("osd-level", 0)
+    mp.commandv("script-message", "osc-visibility", mode)
+    mp.add_timeout(0.05, function()
+        mp.set_property("osd-level", current_level)
+    end)
+end
+
 local function click_handler()
-    local mx, my = mp.get_mouse_pos()
     if not first_point_set then
-        drag_start_x = mx
-        drag_start_y = my
+        -- First click: start drag
+        drag_start_x, drag_start_y = mp.get_mouse_pos()
         first_point_set = true
-        drag_timer = mp.add_periodic_timer(0.05, mouse_move)
-        mp.osd_message("Start point set! Click again to set end point.", 4)
-        print("smartcut: First point set at " .. mx .. ", " .. my)
+        
+        if drag_timer then drag_timer:kill() end
+        drag_timer = mp.add_periodic_timer(1/60, function()
+            local mx, my = mp.get_mouse_pos()
+            draw_crop_box(drag_start_x, drag_start_y, mx, my)
+        end)
     else
-        first_point_set = false
+        -- Second click: finish crop
         if drag_timer then
             drag_timer:kill()
             drag_timer = nil
         end
+        local mx, my = mp.get_mouse_pos()
+        draw_crop_box(drag_start_x, drag_start_y, mx, my)
+        
         screen_x1 = drag_start_x
         screen_y1 = drag_start_y
         screen_x2 = mx
         screen_y2 = my
-        draw_crop_box(screen_x1, screen_y1, screen_x2, screen_y2)
-        mp.osd_message("Crop area set! Press " .. opts.cut_key .. " to render default, or " .. opts.menu_key .. " for menu.", 4)
-        print("smartcut: Second point set at " .. mx .. ", " .. my)
+        
+        -- Deactivate crop mode but keep the frame
+        crop_mode_active = false
+        first_point_set = false
+        
+        -- Stop intercepting mouse clicks
+        mp.remove_key_binding("smartcut-click")
+        
+        -- Restore OSC visibility silently
+        set_osc_visibility("auto")
+        
+        mp.osd_message("Crop area set! Press 'n' for menu, or 'c' to clear.", 4)
     end
 end
 
 local function toggle_crop_mode()
     if not crop_mode_active then
+        -- If a crop area is already drawn, just clear it and don't enter crop mode yet
+        if screen_x1 then
+            screen_x1, screen_y1, screen_x2, screen_y2 = nil, nil, nil, nil
+            overlay.data = ""
+            overlay:update()
+            mp.osd_message("Crop area cleared.", 2)
+            return
+        end
+        
         crop_mode_active = true
         first_point_set = false
-        mp.osd_message("Crop Mode: Click once to set start point, then click again to set end point.", 5)
         mp.add_forced_key_binding("mbtn_left", "smartcut-click", click_handler)
+        
+        -- Hide the default On-Screen Controller (OSC) completely and silently
+        set_osc_visibility("never")
+        
+        mp.osd_message("Crop Mode: Click once to set start point, then click again to set end point.", 5)
     else
         crop_mode_active = false
         first_point_set = false
@@ -194,11 +250,15 @@ local function toggle_crop_mode()
             drag_timer:kill()
             drag_timer = nil
         end
-        mp.osd_message("Crop Mode deactivated.", 2)
         mp.remove_key_binding("smartcut-click")
         overlay.data = ""
         overlay:update()
         screen_x1, screen_y1, screen_x2, screen_y2 = nil, nil, nil, nil
+        
+        -- Restore OSC visibility silently
+        set_osc_visibility("auto")
+        
+        mp.osd_message("Crop Mode deactivated.", 2)
     end
 end
 
@@ -252,6 +312,42 @@ local function escape_filter_path(path)
     -- Escape single quotes (e.g. ' -> \')
     path = path:gsub("'", "\\'")
     return path
+end
+
+-- Retrieve active video track FFmpeg index
+local function get_active_video_info()
+    local vid = mp.get_property("vid")
+    if not vid or vid == "no" or vid == "auto" then return nil end
+    vid = tonumber(vid)
+    if not vid then return nil end
+
+    local track_list = mp.get_property_native("track-list")
+    if not track_list then return nil end
+
+    for _, track in ipairs(track_list) do
+        if track.type == "video" and track.id == vid then
+            return track["ff-index"]
+        end
+    end
+    return nil
+end
+
+-- Retrieve active audio track FFmpeg index
+local function get_active_audio_info()
+    local aid = mp.get_property("aid")
+    if not aid or aid == "no" or aid == "auto" then return nil end
+    aid = tonumber(aid)
+    if not aid then return nil end
+
+    local track_list = mp.get_property_native("track-list")
+    if not track_list then return nil end
+
+    for _, track in ipairs(track_list) do
+        if track.type == "audio" and track.id == aid then
+            return track["ff-index"]
+        end
+    end
+    return nil
 end
 
 -- Retrieve active subtitle track information (internal index or external path)
@@ -436,6 +532,19 @@ local function run_render(current_format)
         table.insert(args, "-i")
         table.insert(args, input_path)
 
+        -- Map correct streams
+        local ff_video_idx = get_active_video_info()
+        local ff_audio_idx = get_active_audio_info()
+
+        if ff_video_idx then
+            table.insert(args, "-map")
+            table.insert(args, "0:" .. ff_video_idx)
+        end
+        if current_format == "mp4" and ff_audio_idx then
+            table.insert(args, "-map")
+            table.insert(args, "0:" .. ff_audio_idx)
+        end
+
         -- Format specific arguments
         if current_format == "mp4" then
             local vf_items = {}
@@ -542,6 +651,9 @@ local function run_render(current_format)
                 overlay:update()
                 crop_mode_active = false
                 mp.remove_key_binding("smartcut-click")
+                
+                -- Restore OSC visibility silently
+                set_osc_visibility("auto")
             else
                 local err_msg = "Error creating cropped/cut clip!"
                 if result and result.stderr then
@@ -563,29 +675,39 @@ local function draw_menu()
         menu_overlay.res_y = h
     end
     
-    local ass = "{\\an7\\pos(30,150)\\fs22\\fnArial\\b1\\1c&HFFFF00&\\3c&H000000&\\3a&H00&\\bord2}"
-    ass = ass .. "=== SMART CLIP SELECTOR ==={\\b0}\\N"
+    -- Base style: Top-left, sleek dark border & shadow for maximum readability
+    local ass = "{\\an7\\pos(40,40)\\bord3\\3c&H111111&\\shad2\\4c&H000000&}"
     
+    -- Title
+    ass = ass .. "{\\fs28\\b1\\1c&HFFFFFF&}SMARTCUT {\\b0\\1c&HAAAAAA&}MENU{\\b0}\\N"
+    
+    -- Mode indicator
     if has_crop then
-        ass = ass .. "{\\fs16\\1c&H00FF00&}Mode: Cropping Active{\\fs22\\1c&HFFFFFF&}\\N\\N"
+        ass = ass .. "{\\fs16\\1c&H77FF77&}● Cropping Active{\\1c&HFFFFFF&}\\N\\N"
     else
-        ass = ass .. "{\\fs16\\1c&H00FFFF&}Mode: Full-Frame Cutting{\\fs22\\1c&HFFFFFF&}\\N\\N"
+        ass = ass .. "{\\fs16\\1c&H00A5FF&}● Full-Frame Mode{\\1c&HFFFFFF&}\\N\\N"
     end
     
+    -- Options
     for i, opt in ipairs(menu_options) do
+        local desc = get_format_desc(opt)
         if i == menu_sel then
-            ass = ass .. "{\\1c&H00FFFF&\\b1}  ➤  [" .. opt:upper() .. "] " .. get_format_desc(opt) .. "{\\b0\\1c&HFFFFFF&}\\N"
+            -- Selected item: Cyan accent, bold
+            ass = ass .. "{\\fs26\\1c&HFFDD00&\\b1}▶  " .. opt:upper() .. "  {\\fs18\\1c&HDDDDDD&\\b0}" .. desc .. "{\\1c&HFFFFFF&}\\N"
         else
-            ass = ass .. "{\\1c&HCCCCCC&}      [" .. opt:upper() .. "] " .. get_format_desc(opt) .. "{\\1c&HFFFFFF&}\\N"
+            -- Unselected item: White
+            ass = ass .. "{\\fs24\\1c&HFFFFFF&}    " .. opt:upper() .. "  {\\fs16\\1c&H888888&}" .. desc .. "{\\1c&HFFFFFF&}\\N"
         end
     end
     
+    -- Show disabled options if cropping
     if has_crop then
-        ass = ass .. "{\\1c&H666666&}      [SMARTCUT] (Disabled - cropping active){\\1c&HFFFFFF&}\\N"
-        ass = ass .. "{\\1c&H666666&}      [SMARTCUT_MP4] (Disabled - cropping active){\\1c&HFFFFFF&}\\N"
+        ass = ass .. "{\\fs18\\1c&H555555&}    SMARTCUT  (Requires Full-Frame)\\N"
+        ass = ass .. "{\\fs18\\1c&H555555&}    SMARTCUT_MP4  (Requires Full-Frame)\\N"
     end
     
-    ass = ass .. "\\N{\\fs14\\1c&H888888&}[Up/Down] Navigate   [Enter] Confirm & Render   [Esc/" .. opts.menu_key .. "] Close Menu{\\1c&HFFFFFF&}"
+    -- Footer controls
+    ass = ass .. "\\N{\\fs14\\1c&H999999&}Use [↑/↓] to navigate  ·  [Enter] to render  ·  [Esc] to close"
     
     menu_overlay.data = ass
     menu_overlay:update()
