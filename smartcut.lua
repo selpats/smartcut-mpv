@@ -22,13 +22,14 @@ options.read_options(opts, "smartcut")
 
 local profiles = {}
 local user_profiles_file = mp.command_native({"expand-path", "~~/script-opts/smartcut_profiles.json"})
-local repo_profiles_file = mp.get_script_directory() .. "/smartcut_profiles.json"
+local script_dir = mp.get_script_directory()
+local repo_profiles_file = script_dir and (script_dir .. "/smartcut_profiles.json") or nil
 
 local function load_profiles()
     local f = io.open(user_profiles_file, "r")
     
     -- If user config doesn't exist in script-opts, read from the script directory
-    if not f then
+    if not f and repo_profiles_file then
         f = io.open(repo_profiles_file, "r")
     end
     
