@@ -528,7 +528,7 @@ local function run_render(profile_id)
         print("smartcut: Output: " .. output_path)
 
         -- Construct ffmpeg arguments
-        local args = { resolve_path(opts.ffmpeg_path), "-y" }
+        local args = { resolve_path(opts.ffmpeg_path), "-y", "-hide_banner", "-loglevel", "error" }
 
         -- Time input arguments (placed before input for fast seeking)
         table.insert(args, "-ss")
