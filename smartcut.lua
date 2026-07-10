@@ -566,7 +566,13 @@ local function run_render(profile_id)
             else
                 sub_filter = "subtitles='" .. escape_filter_path(input_path) .. "':si=" .. sub_info.si
             end
+            
+            -- Fix subtitle sync: since we use -ss before -i, video frames start at PTS 0.
+            -- We temporarily shift the video timestamps forward by start_time so the subtitles
+            -- filter burns the correct text, then we normalize them back to 0.
+            table.insert(vf_items, "setpts=PTS+" .. tostring(start_time) .. "/TB")
             table.insert(vf_items, sub_filter)
+            table.insert(vf_items, "setpts=PTS-STARTPTS")
         end
         
         if profile.vf_suffix and profile.vf_suffix ~= "" then
