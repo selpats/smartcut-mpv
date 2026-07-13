@@ -3,22 +3,19 @@
         "id": "smartcut",
         "name": "Lossless Keyframe Cut",
         "type": "smartcut",
-        "ext": "auto",
-        "supports_crop": false
+        "ext": "auto"
     },
     {
         "id": "smartcut_mp4",
         "name": "Lossless Keyframe Cut (MP4)",
         "type": "smartcut",
-        "ext": "mp4",
-        "supports_crop": false
+        "ext": "mp4"
     },
     {
         "id": "mp4",
         "name": "MP4 Video (H.264)",
         "type": "ffmpeg",
         "ext": "mp4",
-        "supports_crop": true,
         "video_args": [
             "-c:v",
             "libx264",
@@ -33,11 +30,31 @@
         ]
     },
     {
+        "id": "mp4_720p",
+        "name": "MP4 Video (H.264, 720p Web)",
+        "type": "ffmpeg",
+        "ext": "mp4",
+        "vf_prefix": "scale=-2:'min(ih,720)'",
+        "video_args": [
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            "-preset",
+            "medium",
+            "-movflags",
+            "+faststart"
+        ],
+        "audio_args": [
+            "-c:a",
+            "copy"
+        ]
+    },
+    {
         "id": "gif",
         "name": "GIF Animation",
         "type": "ffmpeg",
         "ext": "gif",
-        "supports_crop": true,
         "vf_prefix": "fps=15,scale=-1:-1",
         "vf_suffix": "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
         "audio_args": [
@@ -49,7 +66,6 @@
         "name": "AVIF Video (SVT-AV1)",
         "type": "ffmpeg",
         "ext": "avif",
-        "supports_crop": true,
         "video_args": [
             "-c:v",
             "libsvtav1",

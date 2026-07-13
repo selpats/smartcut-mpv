@@ -409,7 +409,7 @@ local function run_render(profile_id)
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
 
     if profile.type == "smartcut" then
-        if has_crop and not profile.supports_crop then
+        if has_crop then
             mp.osd_message("Error: " .. profile.name .. " does not support cropping!\nOpen menu (" .. opts.menu_key .. ") to choose a compatible format.", 5)
             return
         end
@@ -437,12 +437,26 @@ local function run_render(profile_id)
             tostring(start_time) .. "," .. tostring(end_time)
         }
 
-        local aid = mp.get_property_number("aid")
-        if aid then
+        local mute = mp.get_property_native("mute")
+        local vol = mp.get_property_number("volume")
+        local aid = mp.get_property_native("aid")
+        
+        local drop_audio = (mute == true) or (vol and vol <= 0) or (aid == "no" or aid == false or aid == nil)
+
+        if drop_audio then
             table.insert(args, "-a")
-            table.insert(args, tostring(aid - 1))
-            print("smartcut: Currently playing audio track: " .. aid .. " (0-based index: " .. (aid - 1) .. ")")
+            table.insert(args, "-1")
+            print("smartcut: Auto-detected muted/no audio. Passing -a -1 to drop audio.")
+        else
+            local aid_num = mp.get_property_number("aid")
+            if aid_num then
+                table.insert(args, "-a")
+                table.insert(args, tostring(aid_num - 1))
+                print("smartcut: Currently playing audio track: " .. aid_num .. " (0-based index: " .. (aid_num - 1) .. ")")
+            end
         end
+
+
 
         mp.command_native_async({
             name = "subprocess",
@@ -535,11 +549,17 @@ local function run_render(profile_id)
         local ff_video_idx = get_active_video_info()
         local ff_audio_idx = get_active_audio_info()
 
+        local mute = mp.get_property_native("mute")
+        local vol = mp.get_property_number("volume")
+        local aid_prop = mp.get_property_native("aid")
+        
+        local drop_audio = (mute == true) or (vol and vol <= 0) or (aid_prop == "no" or aid_prop == false or aid_prop == nil)
+
         if ff_video_idx then
             table.insert(args, "-map")
             table.insert(args, "0:" .. ff_video_idx)
         end
-        if ff_audio_idx and profile.audio_args and #profile.audio_args > 0 then
+        if ff_audio_idx and not drop_audio and profile.audio_args and #profile.audio_args > 0 then
             table.insert(args, "-map")
             table.insert(args, "0:" .. ff_audio_idx)
         end
@@ -584,11 +604,13 @@ local function run_render(profile_id)
             end
         end
         
-        if profile.audio_args then
+        if profile.audio_args and not drop_audio then
             for _, arg in ipairs(profile.audio_args) do
                 table.insert(args, arg)
             end
         end
+
+
 
         table.insert(args, output_path)
 
@@ -665,7 +687,7 @@ local function draw_menu()
     -- Show disabled options if cropping
     if has_crop then
         for _, p in ipairs(profiles) do
-            if not p.supports_crop then
+            if p.type ~= "ffmpeg" then
                 ass = ass .. "{\\fs18\\1c&H555555&}    " .. p.id:upper() .. "  (Requires Full-Frame)\\N"
             end
         end
@@ -732,7 +754,7 @@ local function toggle_menu()
     if has_crop then
         local def = opts.default_crop_mode:lower()
         for _, p in ipairs(profiles) do
-            if p.supports_crop then
+            if p.type == "ffmpeg" then
                 table.insert(menu_options, p.id)
             end
         end
