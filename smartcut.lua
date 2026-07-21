@@ -8,10 +8,6 @@ local opts = {
     smartcut_path = "smartcut",
     output_dir = "~/Videos",
     filename_template = "clip_%Y-%m-%d_%H-%M-%S",
-    mark_key = "c",
-    crop_key = "r",
-    cut_key = "C",
-    menu_key = "n",
     
     default_cut_mode = "smartcut",
     default_crop_mode = "mp4"
@@ -62,6 +58,8 @@ local menu_active = false
 local menu_options = {}
 local menu_sel = 1
 
+
+
 local function get_home()
     return os.getenv("USERPROFILE") or os.getenv("HOME") or "."
 end
@@ -82,6 +80,29 @@ local function format_time(seconds)
     local s = math.floor(seconds % 60)
     local ms = math.floor((seconds % 1) * 1000)
     return string.format("%02d:%02d:%02d.%03d", h, m, s, ms)
+end
+
+local function update_time_overlay()
+    if menu_active then
+        return
+    end
+    if not start_time then
+        menu_overlay.data = ""
+        menu_overlay:update()
+        return
+    end
+    local start_str = format_time(start_time)
+    local end_str = end_time and format_time(end_time) or "..."
+    local ass = "{\\an7\\pos(25,200)\\fs28\\b1\\1c&HFFFFFF&}" .. start_str .. " - " .. end_str
+    
+    if not end_time then
+        ass = ass .. "\\N{\\fs18\\b0\\1c&H999999&}[x] Set End"
+    else
+        ass = ass .. "\\N{\\fs18\\b0\\1c&H999999&}[X] Render  ·  [n] Menu  ·  [r] Crop"
+    end
+    
+    menu_overlay.data = ass
+    menu_overlay:update()
 end
 
 -- Calculate video actual bounds relative to OSD size (for letterbox/pillarbox)
@@ -228,7 +249,7 @@ local function click_handler()
         -- Restore OSC visibility silently
         set_osc_visibility("auto")
         
-        mp.osd_message("Crop area set! Press 'n' for menu, or 'c' to clear.", 4)
+
     end
 end
 
@@ -239,7 +260,7 @@ local function toggle_crop_mode()
             screen_x1, screen_y1, screen_x2, screen_y2 = nil, nil, nil, nil
             overlay.data = ""
             overlay:update()
-            mp.osd_message("Crop area cleared.", 2)
+
             return
         end
         
@@ -250,7 +271,8 @@ local function toggle_crop_mode()
         -- Hide the default On-Screen Controller (OSC) completely and silently
         set_osc_visibility("never")
         
-        mp.osd_message("Crop Mode: Click once to set start point, then click again to set end point.", 5)
+        mp.osd_message("Crop mode active", 3)
+
     else
         crop_mode_active = false
         first_point_set = false
@@ -266,7 +288,7 @@ local function toggle_crop_mode()
         -- Restore OSC visibility silently
         set_osc_visibility("auto")
         
-        mp.osd_message("Crop Mode deactivated.", 2)
+
     end
 end
 
@@ -281,7 +303,6 @@ local function mark_time()
     if not start_time or (start_time and end_time) then
         start_time = pos
         end_time = nil
-        mp.osd_message("Start set: " .. format_time(start_time), 3)
         print("smartcut: Set start time to " .. start_time)
     else
         if pos <= start_time then
@@ -289,9 +310,9 @@ local function mark_time()
             return
         end
         end_time = pos
-        mp.osd_message("End set: " .. format_time(end_time) .. "\nPress " .. opts.cut_key .. " to cut, or " .. opts.menu_key .. " for menu!", 4)
         print("smartcut: Set end time to " .. end_time)
     end
+    update_time_overlay()
 end
 
 local function escape_filter_path(path)
@@ -340,8 +361,12 @@ local function get_active_audio_info()
     return nil
 end
 
--- Retrieve active subtitle track information (internal index or external path)
 local function get_active_sub_info()
+    local sub_vis = mp.get_property_native("sub-visibility")
+    if sub_vis == false then
+        return nil
+    end
+
     local sid = mp.get_property("sid")
     if not sid or sid == "no" or sid == "auto" then
         return nil
@@ -409,11 +434,6 @@ local function run_render(profile_id)
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
 
     if profile.type == "smartcut" then
-        if has_crop then
-            mp.osd_message("Error: " .. profile.name .. " does not support cropping!\nOpen menu (" .. opts.menu_key .. ") to choose a compatible format.", 5)
-            return
-        end
-
         local ext = profile.ext
         if ext == "auto" then
             ext = input_path:match("^.+(%.[^.]+)$") or ".mkv"
@@ -424,10 +444,14 @@ local function run_render(profile_id)
         local filename = os.date(opts.filename_template) .. ext
         local output_path = output_dir .. "/" .. filename
 
-        mp.osd_message("Creating lossless clip (" .. profile.name .. ")...\n" .. format_time(start_time) .. " - " .. format_time(end_time), 3)
+        mp.osd_message("Rendering lossless clip (" .. profile.name .. ")...\n" .. format_time(start_time) .. " - " .. format_time(end_time), 3)
         print("smartcut: Running smartcut...")
         print("smartcut: Input: " .. input_path)
         print("smartcut: Output: " .. output_path)
+
+        -- Hide overlay during render
+        menu_overlay.data = ""
+        menu_overlay:update()
 
         local args = {
             resolve_path(opts.smartcut_path),
@@ -464,19 +488,21 @@ local function run_render(profile_id)
             args = args
         }, function(success, result, error)
             if success and result and result.status == 0 then
-                mp.osd_message("Lossless clip created successfully!\nSaved to: " .. filename, 5)
-                print("smartcut: Lossless cut completed successfully.")
+                mp.osd_message("Clip created successfully!\nSaved to: " .. filename, 5)
+                print("smartcut: Lossless clip completed successfully.")
                 
-                -- Reset markers
+                -- Reset markers and overlay
                 start_time = nil
                 end_time = nil
+                update_time_overlay()
             else
                 local err_msg = "Error creating lossless clip!"
                 if result and result.stderr then
                     err_msg = err_msg .. "\n" .. result.stderr
                 end
                 mp.osd_message(err_msg, 7)
-                print("smartcut: Lossless cut failed. Status: " .. (result and result.status or "nil") .. ", Error: " .. (error or "nil"))
+                print("smartcut: Smartcut failed. Status: " .. (result and result.status or "nil") .. ", Error: " .. (error or "nil"))
+                update_time_overlay()
             end
         end)
     elseif profile.type == "ffmpeg" then
@@ -513,26 +539,26 @@ local function run_render(profile_id)
         local sub_info = get_active_sub_info()
 
         if has_crop then
-            local msg = "Rendering cropped clip (" .. profile.name .. ")...\n(Trimming & Re-encoding"
-            if sub_info then
-                msg = msg .. " + Subtitles"
-            end
-            msg = msg .. ")"
+            local msg = "Rendering cropped clip"
+            if sub_info then msg = msg .. " with subtitles" end
+            msg = msg .. " (" .. profile.name .. ")..."
             mp.osd_message(msg, 5)
             print("smartcut: Running crop...")
             print("smartcut: Crop filter: crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
         else
-            local msg = "Rendering full clip (" .. profile.name .. ")...\n(Trimming & Re-encoding"
-            if sub_info then
-                msg = msg .. " + Subtitles"
-            end
-            msg = msg .. ")"
+            local msg = "Rendering clip"
+            if sub_info then msg = msg .. " with subtitles" end
+            msg = msg .. " (" .. profile.name .. ")..."
             mp.osd_message(msg, 5)
             print("smartcut: Running encode (no crop)...")
         end
         print("smartcut: Format: " .. profile.name)
         print("smartcut: Input: " .. input_path)
         print("smartcut: Output: " .. output_path)
+
+        -- Hide overlay during render
+        menu_overlay.data = ""
+        menu_overlay:update()
 
         -- Construct ffmpeg arguments
         local args = { resolve_path(opts.ffmpeg_path), "-y", "-hide_banner", "-loglevel", "error" }
@@ -620,12 +646,13 @@ local function run_render(profile_id)
             args = args
         }, function(success, result, error)
             if success and result and result.status == 0 then
-                mp.osd_message(profile.id:upper() .. " clip created successfully!\nSaved to: " .. filename, 5)
+                mp.osd_message("Clip created successfully!\nSaved to: " .. filename, 5)
                 print("smartcut: Crop/Cut completed successfully.")
                 
                 -- Reset markers and overlay
                 start_time = nil
                 end_time = nil
+                update_time_overlay()
                 screen_x1, screen_y1, screen_x2, screen_y2 = nil, nil, nil, nil
                 overlay.data = ""
                 overlay:update()
@@ -641,6 +668,7 @@ local function run_render(profile_id)
                 end
                 mp.osd_message(err_msg, 7)
                 print("smartcut: Crop/Cut failed. Status: " .. (result and result.status or "nil") .. ", Error: " .. (error or "nil"))
+                update_time_overlay()
             end
         end)
     end
@@ -654,17 +682,25 @@ local function draw_menu()
         menu_overlay.res_y = h
     end
     
-    -- Base style: Top-left, sleek dark border & shadow for maximum readability
-    local ass = "{\\an7\\pos(40,40)\\bord3\\3c&H111111&\\shad2\\4c&H000000&}"
+    -- Base style: Top-left, lowered to prevent overlap with standard mp.osd_message
+    local ass = "{\\an7\\pos(25,200)}"
     
     -- Title
-    ass = ass .. "{\\fs28\\b1\\1c&HFFFFFF&}SMARTCUT {\\b0\\1c&HAAAAAA&}MENU{\\b0}\\N"
+    ass = ass .. "{\\fs32\\b1\\1c&HFFFFFF&}SMARTCUT {\\b0\\1c&HAAAAAA&}MENU{\\b0}\\N"
     
     -- Mode indicator
     if has_crop then
-        ass = ass .. "{\\fs16\\1c&H77FF77&}● Cropping Active{\\1c&HFFFFFF&}\\N\\N"
+        ass = ass .. "{\\fs20\\1c&H77FF77&}● Cropping Active{\\1c&HFFFFFF&}\\N"
     else
-        ass = ass .. "{\\fs16\\1c&H00A5FF&}● Full-Frame Mode{\\1c&HFFFFFF&}\\N\\N"
+        ass = ass .. "{\\fs20\\1c&H00A5FF&}● Full-Frame Mode{\\1c&HFFFFFF&}\\N"
+    end
+    
+    if start_time then
+        local start_str = format_time(start_time)
+        local end_str = end_time and format_time(end_time) or "..."
+        ass = ass .. "{\\fs28\\b1\\1c&HFFFFFF&}" .. start_str .. " - " .. end_str .. "\\N\\N"
+    else
+        ass = ass .. "\\N"
     end
     
     -- Options
@@ -676,11 +712,11 @@ local function draw_menu()
         local desc = profile and profile.name or opt_id
 
         if i == menu_sel then
-            -- Selected item: Cyan accent, bold
-            ass = ass .. "{\\fs26\\1c&HFFDD00&\\b1}▶  " .. opt_id:upper() .. "  {\\fs18\\1c&HDDDDDD&\\b0}" .. desc .. "{\\1c&HFFFFFF&}\\N"
+            -- Selected item: Yellow accent, bold
+            ass = ass .. "{\\fs30\\1c&HFFDD00&\\b1}▶  " .. opt_id:upper() .. "  {\\fs22\\1c&HDDDDDD&\\b0}" .. desc .. "{\\1c&HFFFFFF&}\\N"
         else
             -- Unselected item: White
-            ass = ass .. "{\\fs24\\1c&HFFFFFF&}    " .. opt_id:upper() .. "  {\\fs16\\1c&H888888&}" .. desc .. "{\\1c&HFFFFFF&}\\N"
+            ass = ass .. "{\\fs28\\1c&HFFFFFF&}    " .. opt_id:upper() .. "  {\\fs20\\1c&H888888&}" .. desc .. "{\\1c&HFFFFFF&}\\N"
         end
     end
     
@@ -688,13 +724,13 @@ local function draw_menu()
     if has_crop then
         for _, p in ipairs(profiles) do
             if p.type ~= "ffmpeg" then
-                ass = ass .. "{\\fs18\\1c&H555555&}    " .. p.id:upper() .. "  (Requires Full-Frame)\\N"
+                ass = ass .. "{\\fs22\\1c&H555555&}    " .. p.id:upper() .. "  (Requires Full-Frame)\\N"
             end
         end
     end
     
     -- Footer controls
-    ass = ass .. "\\N{\\fs14\\1c&H999999&}Use [↑/↓] to navigate  ·  [Enter] to render  ·  [Esc] to close"
+    ass = ass .. "\\N{\\fs18\\1c&H999999&}[↑/↓] Navigate  ·  [Enter] Render  ·  [Esc] Close"
     
     menu_overlay.data = ass
     menu_overlay:update()
@@ -708,6 +744,7 @@ local function close_menu()
     menu_overlay.data = ""
     menu_overlay:update()
     menu_active = false
+    update_time_overlay()
     print("smartcut: Menu closed.")
 end
 
@@ -780,7 +817,6 @@ local function toggle_menu()
     mp.add_forced_key_binding("DOWN", "menu-down", menu_down)
     mp.add_forced_key_binding("ENTER", "menu-enter", menu_enter)
     mp.add_forced_key_binding("ESC", "menu-close", close_menu)
-    mp.add_forced_key_binding(opts.menu_key, "menu-toggle-close", close_menu)
     
     print("smartcut: Menu opened.")
 end
@@ -810,7 +846,7 @@ local function make_clip()
     run_render(target_format)
 end
 
-mp.add_key_binding(opts.mark_key, "smartcut-mark", mark_time)
-mp.add_key_binding(opts.crop_key, "smartcut-crop", toggle_crop_mode)
-mp.add_key_binding(opts.cut_key, "smartcut-cut", make_clip)
-mp.add_key_binding(opts.menu_key, "smartcut-menu", toggle_menu)
+mp.add_key_binding("x", "smartcut-mark", mark_time)
+mp.add_key_binding("r", "smartcut-crop", toggle_crop_mode)
+mp.add_key_binding("X", "smartcut-cut", make_clip)
+mp.add_key_binding("n", "smartcut-menu", toggle_menu)

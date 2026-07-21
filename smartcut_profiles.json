@@ -31,7 +31,7 @@
     },
     {
         "id": "mp4_720p",
-        "name": "MP4 Video (H.264, 720p Web)",
+        "name": "MP4 Video (H.264, 720p)",
         "type": "ffmpeg",
         "ext": "mp4",
         "vf_prefix": "scale=-2:'min(ih,720)'",
