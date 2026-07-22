@@ -58,7 +58,11 @@ local menu_active = false
 local menu_options = {}
 local menu_sel = 1
 
-
+local draw_menu
+local update_menu_options
+local check_active_state
+local cancel_all
+local undo_timecode
 
 local function get_home()
     return os.getenv("USERPROFILE") or os.getenv("HOME") or "."
@@ -95,14 +99,67 @@ local function update_time_overlay()
     local end_str = end_time and format_time(end_time) or "..."
     local ass = "{\\an7\\pos(25,200)\\fs28\\b1\\1c&HFFFFFF&}" .. start_str .. " - " .. end_str
     
-    if not end_time then
-        ass = ass .. "\\N{\\fs18\\b0\\1c&H999999&}[x] Set End"
-    else
-        ass = ass .. "\\N{\\fs18\\b0\\1c&H999999&}[X] Render  ·  [n] Menu  ·  [r] Crop"
-    end
+    ass = ass .. "\\N{\\fs18\\b0\\1c&H999999&}[x] Mark  ·  [X] Render  ·  [n] Menu  ·  [r] Crop"
+    ass = ass .. "\\N{\\fs18\\b0\\1c&H999999&}[BS] Undo  ·  [Esc] Cancel"
     
     menu_overlay.data = ass
     menu_overlay:update()
+end
+
+check_active_state = function()
+    local is_active = start_time or menu_active or crop_mode_active or screen_x1
+    
+    if is_active then
+        mp.add_forced_key_binding("ESC", "smartcut-cancel", cancel_all)
+        if start_time then
+            mp.add_forced_key_binding("BS", "smartcut-undo", undo_timecode)
+        else
+            mp.remove_key_binding("smartcut-undo")
+        end
+    else
+        mp.remove_key_binding("smartcut-cancel")
+        mp.remove_key_binding("smartcut-undo")
+    end
+end
+
+cancel_all = function()
+    if menu_active then
+        menu_active = false
+        mp.remove_key_binding("menu-up")
+        mp.remove_key_binding("menu-down")
+        mp.remove_key_binding("menu-enter")
+    end
+    
+    if crop_mode_active or screen_x1 then
+        crop_mode_active = false
+        first_point_set = false
+        if drag_timer then
+            drag_timer:kill()
+            drag_timer = nil
+        end
+        mp.remove_key_binding("smartcut-click")
+        screen_x1, screen_y1, screen_x2, screen_y2 = nil, nil, nil, nil
+        overlay.data = ""
+        overlay:update()
+        set_osc_visibility("auto")
+    end
+    
+    start_time = nil
+    end_time = nil
+    
+    update_time_overlay()
+    check_active_state()
+end
+
+undo_timecode = function()
+    if end_time then
+        end_time = nil
+    elseif start_time then
+        start_time = nil
+    end
+    update_time_overlay()
+    if menu_active then draw_menu() end
+    check_active_state()
 end
 
 -- Calculate video actual bounds relative to OSD size (for letterbox/pillarbox)
@@ -249,7 +306,11 @@ local function click_handler()
         -- Restore OSC visibility silently
         set_osc_visibility("auto")
         
-
+        if menu_active then
+            update_menu_options()
+            draw_menu()
+        end
+        check_active_state()
     end
 end
 
@@ -260,18 +321,33 @@ local function toggle_crop_mode()
             screen_x1, screen_y1, screen_x2, screen_y2 = nil, nil, nil, nil
             overlay.data = ""
             overlay:update()
-
+            
+            if menu_active then
+                update_menu_options()
+                draw_menu()
+            end
+            check_active_state()
             return
         end
         
         crop_mode_active = true
         first_point_set = false
         mp.add_forced_key_binding("mbtn_left", "smartcut-click", click_handler)
+        check_active_state()
         
         -- Hide the default On-Screen Controller (OSC) completely and silently
         set_osc_visibility("never")
         
-        mp.osd_message("Crop mode active", 3)
+        local w, h = mp.get_osd_size()
+        if w and h then
+            overlay.res_x = w
+            overlay.res_y = h
+            overlay.data = string.format(
+                "{\\an7\\pos(0,0)\\1c&H000000&\\1a&H88&\\bord0\\p1}m 0 0 l %d 0 l %d %d l 0 %d l 0 0{\\p0}",
+                w, w, h, h
+            )
+            overlay:update()
+        end
 
     else
         crop_mode_active = false
@@ -287,8 +363,7 @@ local function toggle_crop_mode()
         
         -- Restore OSC visibility silently
         set_osc_visibility("auto")
-        
-
+        check_active_state()
     end
 end
 
@@ -303,16 +378,20 @@ local function mark_time()
     if not start_time or (start_time and end_time) then
         start_time = pos
         end_time = nil
-        print("smartcut: Set start time to " .. start_time)
     else
         if pos <= start_time then
             mp.osd_message("Error: End time must be after start time", 3)
             return
         end
         end_time = pos
-        print("smartcut: Set end time to " .. end_time)
     end
+    
     update_time_overlay()
+    
+    if menu_active then
+        draw_menu()
+    end
+    check_active_state()
 end
 
 local function escape_filter_path(path)
@@ -673,8 +752,35 @@ local function run_render(profile_id)
         end)
     end
 end
+
+update_menu_options = function()
+    local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
+    menu_options = {}
+    if has_crop then
+        local def = opts.default_crop_mode:lower()
+        for _, p in ipairs(profiles) do
+            if p.type == "ffmpeg" then
+                table.insert(menu_options, p.id)
+            end
+        end
+        menu_sel = 1
+        for i, opt in ipairs(menu_options) do
+            if opt == def then menu_sel = i; break end
+        end
+    else
+        local def = opts.default_cut_mode:lower()
+        for _, p in ipairs(profiles) do
+            table.insert(menu_options, p.id)
+        end
+        menu_sel = 1
+        for i, opt in ipairs(menu_options) do
+            if opt == def then menu_sel = i; break end
+        end
+    end
+end
+
 -- OSD Menu Drawing function
-local function draw_menu()
+draw_menu = function()
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
     local w, h = mp.get_osd_size()
     if w and h then
@@ -698,10 +804,12 @@ local function draw_menu()
     if start_time then
         local start_str = format_time(start_time)
         local end_str = end_time and format_time(end_time) or "..."
-        ass = ass .. "{\\fs28\\b1\\1c&HFFFFFF&}" .. start_str .. " - " .. end_str .. "\\N\\N"
+        ass = ass .. "{\\fs28\\b1\\1c&HFFFFFF&}" .. start_str .. " - " .. end_str .. "\\N"
     else
-        ass = ass .. "\\N"
+        ass = ass .. "{\\fs28\\b1\\1c&H666666&}No Timecodes Set\\N"
     end
+    
+    ass = ass .. "{\\fs18\\b0\\1c&H999999&}[x] Mark  ·  [r] Crop  ·  [BS] Undo\\N\\N"
     
     -- Options
     for i, opt_id in ipairs(menu_options) do
@@ -739,12 +847,11 @@ local function close_menu()
     mp.remove_key_binding("menu-up")
     mp.remove_key_binding("menu-down")
     mp.remove_key_binding("menu-enter")
-    mp.remove_key_binding("menu-close")
-    mp.remove_key_binding("menu-toggle-close")
     menu_overlay.data = ""
     menu_overlay:update()
     menu_active = false
     update_time_overlay()
+    check_active_state()
     print("smartcut: Menu closed.")
 end
 
@@ -768,6 +875,10 @@ end
 
 local function menu_enter()
     if not menu_active then return end
+    if not start_time or not end_time then
+        mp.osd_message("Error: Set start and end times first!", 3)
+        return
+    end
     local selected_format = menu_options[menu_sel]
     close_menu()
     run_render(selected_format)
@@ -780,35 +891,7 @@ local function toggle_menu()
         return
     end
 
-    if not start_time or not end_time then
-        mp.osd_message("Error: Set start and end times first!", 3)
-        return
-    end
-
-    local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
-    
-    menu_options = {}
-    if has_crop then
-        local def = opts.default_crop_mode:lower()
-        for _, p in ipairs(profiles) do
-            if p.type == "ffmpeg" then
-                table.insert(menu_options, p.id)
-            end
-        end
-        menu_sel = 1
-        for i, opt in ipairs(menu_options) do
-            if opt == def then menu_sel = i; break end
-        end
-    else
-        local def = opts.default_cut_mode:lower()
-        for _, p in ipairs(profiles) do
-            table.insert(menu_options, p.id)
-        end
-        menu_sel = 1
-        for i, opt in ipairs(menu_options) do
-            if opt == def then menu_sel = i; break end
-        end
-    end
+    update_menu_options()
 
     menu_active = true
     draw_menu()
@@ -816,20 +899,20 @@ local function toggle_menu()
     mp.add_forced_key_binding("UP", "menu-up", menu_up)
     mp.add_forced_key_binding("DOWN", "menu-down", menu_down)
     mp.add_forced_key_binding("ENTER", "menu-enter", menu_enter)
-    mp.add_forced_key_binding("ESC", "menu-close", close_menu)
     
+    check_active_state()
     print("smartcut: Menu opened.")
 end
 
 -- Key binding to confirm and run clip generation with default mode
 local function make_clip()
-    if not start_time or not end_time then
-        mp.osd_message("Error: Set start and end times first!", 3)
+    if menu_active then
         return
     end
 
-    if menu_active then
-        close_menu()
+    if not start_time or not end_time then
+        mp.osd_message("Error: Set start and end times first!", 3)
+        return
     end
 
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
