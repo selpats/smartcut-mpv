@@ -543,6 +543,11 @@ local function run_render(profile_id)
             tostring(start_time) .. "," .. tostring(end_time)
         }
 
+        if profile.mode then
+            table.insert(args, "-m")
+            table.insert(args, profile.mode)
+        end
+
         local mute = mp.get_property_native("mute")
         local vol = mp.get_property_number("volume")
         local aid = mp.get_property_native("aid")

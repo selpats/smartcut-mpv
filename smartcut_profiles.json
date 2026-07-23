@@ -1,15 +1,22 @@
 [
     {
         "id": "smartcut",
-        "name": "Lossless Keyframe Cut",
+        "name": "Smart Cut (Recodes ends)",
         "type": "smartcut",
         "ext": "auto"
     },
     {
         "id": "smartcut_mp4",
-        "name": "Lossless Keyframe Cut (MP4)",
+        "name": "Smart Cut MP4 (Recodes ends)",
         "type": "smartcut",
         "ext": "mp4"
+    },
+    {
+        "id": "keyframes",
+        "name": "Fast Keyframe Cut (No recode)",
+        "type": "smartcut",
+        "mode": "keyframes",
+        "ext": "auto"
     },
     {
         "id": "mp4",
