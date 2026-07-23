@@ -375,7 +375,10 @@ local function mark_time()
         return
     end
 
-    if not start_time or (start_time and end_time) then
+    if start_time and end_time then
+        -- Both timecodes already set, do not overwrite. User must use [BS] to undo first.
+        return
+    elseif not start_time then
         start_time = pos
         end_time = nil
     else
