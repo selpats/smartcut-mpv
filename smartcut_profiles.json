@@ -19,6 +19,13 @@
         "ext": "auto"
     },
     {
+        "id": "keyframes_mp4",
+        "name": "Fast Keyframe Cut MP4 (No recode)",
+        "type": "smartcut",
+        "mode": "keyframes",
+        "ext": "mp4"
+    },
+    {
         "id": "mp4",
         "name": "MP4 Video (H.264)",
         "type": "ffmpeg",
