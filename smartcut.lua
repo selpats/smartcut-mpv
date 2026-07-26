@@ -73,9 +73,30 @@ local function resolve_path(path)
     if path:sub(1, 1) == "~" then
         path = get_home() .. path:sub(2)
     end
-    -- Normalize slashes for Windows/Unix
     path = path:gsub("\\", "/")
     return path
+end
+
+local function ensure_dir(dir)
+    if not dir or dir == "" then return end
+    local info = utils.file_info(dir)
+    if info and info.is_dir then return end
+    
+    if package.config:sub(1, 1) == "\\" then
+        -- Windows
+        mp.command_native({
+            name = "subprocess",
+            playback_only = false,
+            args = {"powershell", "-NoProfile", "-Command", "New-Item -ItemType Directory -Force -Path '" .. dir .. "'"}
+        })
+    else
+        -- Unix / Linux / macOS
+        mp.command_native({
+            name = "subprocess",
+            playback_only = false,
+            args = {"mkdir", "-p", dir}
+        })
+    end
 end
 
 local function format_time(seconds)
@@ -526,6 +547,7 @@ local function run_render(profile_id)
             ext = "." .. ext
         end
         local output_dir = resolve_path(opts.output_dir)
+        ensure_dir(output_dir)
         local filename = os.date(opts.filename_template) .. ext
         local output_path = output_dir .. "/" .. filename
 
@@ -615,6 +637,7 @@ local function run_render(profile_id)
         end
 
         local output_dir = resolve_path(opts.output_dir)
+        ensure_dir(output_dir)
         local filename = os.date(opts.filename_template) .. "." .. profile.ext
         local output_path = output_dir .. "/" .. filename
 
