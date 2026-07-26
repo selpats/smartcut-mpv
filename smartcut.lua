@@ -63,6 +63,7 @@ local update_menu_options
 local check_active_state
 local cancel_all
 local undo_timecode
+local set_osc_visibility
 
 local function get_home()
     return os.getenv("USERPROFILE") or os.getenv("HOME") or "."
@@ -128,6 +129,8 @@ cancel_all = function()
         mp.remove_key_binding("menu-up")
         mp.remove_key_binding("menu-down")
         mp.remove_key_binding("menu-enter")
+        menu_overlay.data = ""
+        menu_overlay:update()
     end
     
     if crop_mode_active or screen_x1 then
@@ -262,7 +265,7 @@ local function mouse_move()
     draw_crop_box(drag_start_x, drag_start_y, mx, my)
 end
 
-local function set_osc_visibility(mode)
+set_osc_visibility = function(mode)
     local current_level = mp.get_property("osd-level")
     mp.set_property("osd-level", 0)
     mp.commandv("script-message", "osc-visibility", mode)
@@ -531,9 +534,6 @@ local function run_render(profile_id)
         print("smartcut: Input: " .. input_path)
         print("smartcut: Output: " .. output_path)
 
-        -- Hide overlay during render
-        menu_overlay.data = ""
-        menu_overlay:update()
 
         local args = {
             resolve_path(opts.smartcut_path),
@@ -569,6 +569,8 @@ local function run_render(profile_id)
 
 
 
+        cancel_all()
+
         mp.command_native_async({
             name = "subprocess",
             playback_only = false,
@@ -577,11 +579,6 @@ local function run_render(profile_id)
             if success and result and result.status == 0 then
                 mp.osd_message("Clip created successfully!\nSaved to: " .. filename, 5)
                 print("smartcut: Lossless clip completed successfully.")
-                
-                -- Reset markers and overlay
-                start_time = nil
-                end_time = nil
-                update_time_overlay()
             else
                 local err_msg = "Error creating lossless clip!"
                 if result and result.stderr then
@@ -589,7 +586,6 @@ local function run_render(profile_id)
                 end
                 mp.osd_message(err_msg, 7)
                 print("smartcut: Smartcut failed. Status: " .. (result and result.status or "nil") .. ", Error: " .. (error or "nil"))
-                update_time_overlay()
             end
         end)
     elseif profile.type == "ffmpeg" then
@@ -643,9 +639,6 @@ local function run_render(profile_id)
         print("smartcut: Input: " .. input_path)
         print("smartcut: Output: " .. output_path)
 
-        -- Hide overlay during render
-        menu_overlay.data = ""
-        menu_overlay:update()
 
         -- Construct ffmpeg arguments
         local args = { resolve_path(opts.ffmpeg_path), "-y", "-hide_banner", "-loglevel", "error" }
@@ -727,6 +720,8 @@ local function run_render(profile_id)
 
         table.insert(args, output_path)
 
+        cancel_all()
+
         mp.command_native_async({
             name = "subprocess",
             playback_only = false,
@@ -735,19 +730,6 @@ local function run_render(profile_id)
             if success and result and result.status == 0 then
                 mp.osd_message("Clip created successfully!\nSaved to: " .. filename, 5)
                 print("smartcut: Crop/Cut completed successfully.")
-                
-                -- Reset markers and overlay
-                start_time = nil
-                end_time = nil
-                update_time_overlay()
-                screen_x1, screen_y1, screen_x2, screen_y2 = nil, nil, nil, nil
-                overlay.data = ""
-                overlay:update()
-                crop_mode_active = false
-                mp.remove_key_binding("smartcut-click")
-                
-                -- Restore OSC visibility silently
-                set_osc_visibility("auto")
             else
                 local err_msg = "Error creating cropped/cut clip!"
                 if result and result.stderr then
@@ -755,7 +737,6 @@ local function run_render(profile_id)
                 end
                 mp.osd_message(err_msg, 7)
                 print("smartcut: Crop/Cut failed. Status: " .. (result and result.status or "nil") .. ", Error: " .. (error or "nil"))
-                update_time_overlay()
             end
         end)
     end
