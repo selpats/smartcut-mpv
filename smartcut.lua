@@ -54,9 +54,27 @@ local drag_timer = nil
 
 local overlay = mp.create_osd_overlay("ass-events")
 local menu_overlay = mp.create_osd_overlay("ass-events")
+menu_overlay.z = 100
+local render_overlay = mp.create_osd_overlay("ass-events")
+render_overlay.z = 200
 local menu_active = false
 local menu_options = {}
 local menu_sel = 1
+
+local function show_render_progress(text)
+    local w, h = mp.get_osd_size()
+    if w and h then
+        render_overlay.res_x = w
+        render_overlay.res_y = h
+        render_overlay.data = "{\\an9\\pos(" .. (w - 25) .. ",25)\\fs24\\b1\\1c&HFFFFFF&}⏳ " .. text
+        render_overlay:update()
+    end
+end
+
+local function hide_render_progress()
+    render_overlay.data = ""
+    render_overlay:update()
+end
 
 local draw_menu
 local update_menu_options
@@ -109,7 +127,7 @@ local function format_time(seconds)
 end
 
 local function update_time_overlay()
-    if menu_active then
+    if menu_active or crop_mode_active then
         return
     end
     if not start_time then
@@ -333,6 +351,8 @@ local function click_handler()
         if menu_active then
             update_menu_options()
             draw_menu()
+        else
+            update_time_overlay()
         end
         check_active_state()
     end
@@ -357,6 +377,10 @@ local function toggle_crop_mode()
         crop_mode_active = true
         first_point_set = false
         mp.add_forced_key_binding("mbtn_left", "smartcut-click", click_handler)
+        
+        menu_overlay.data = ""
+        menu_overlay:update()
+        
         check_active_state()
         
         -- Hide the default On-Screen Controller (OSC) completely and silently
@@ -387,6 +411,14 @@ local function toggle_crop_mode()
         
         -- Restore OSC visibility silently
         set_osc_visibility("auto")
+        
+        if menu_active then
+            update_menu_options()
+            draw_menu()
+        else
+            update_time_overlay()
+        end
+        
         check_active_state()
     end
 end
@@ -551,7 +583,7 @@ local function run_render(profile_id)
         local filename = os.date(opts.filename_template) .. ext
         local output_path = output_dir .. "/" .. filename
 
-        mp.osd_message("Rendering lossless clip (" .. profile.name .. ")...\n" .. format_time(start_time) .. " - " .. format_time(end_time), 3)
+        local msg = "Rendering lossless clip (" .. profile.name .. ")..."
         print("smartcut: Running smartcut...")
         print("smartcut: Input: " .. input_path)
         print("smartcut: Output: " .. output_path)
@@ -592,12 +624,14 @@ local function run_render(profile_id)
 
 
         cancel_all()
+        show_render_progress(msg)
 
         mp.command_native_async({
             name = "subprocess",
             playback_only = false,
             args = args
         }, function(success, result, error)
+            hide_render_progress()
             if success and result and result.status == 0 then
                 mp.osd_message("Clip created successfully!\nSaved to: " .. filename, 5)
                 print("smartcut: Lossless clip completed successfully.")
@@ -644,18 +678,17 @@ local function run_render(profile_id)
         -- Check for active subtitles to burn in
         local sub_info = get_active_sub_info()
 
+        local msg = "Rendering clip"
         if has_crop then
-            local msg = "Rendering cropped clip"
-            if sub_info then msg = msg .. " with subtitles" end
-            msg = msg .. " (" .. profile.name .. ")..."
-            mp.osd_message(msg, 5)
+            msg = "Rendering cropped clip"
+        end
+        if sub_info then msg = msg .. " with subtitles" end
+        msg = msg .. " (" .. profile.name .. ")..."
+        
+        if has_crop then
             print("smartcut: Running crop...")
             print("smartcut: Crop filter: crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
         else
-            local msg = "Rendering clip"
-            if sub_info then msg = msg .. " with subtitles" end
-            msg = msg .. " (" .. profile.name .. ")..."
-            mp.osd_message(msg, 5)
             print("smartcut: Running encode (no crop)...")
         end
         print("smartcut: Format: " .. profile.name)
@@ -744,12 +777,14 @@ local function run_render(profile_id)
         table.insert(args, output_path)
 
         cancel_all()
+        show_render_progress(msg)
 
         mp.command_native_async({
             name = "subprocess",
             playback_only = false,
             args = args
         }, function(success, result, error)
+            hide_render_progress()
             if success and result and result.status == 0 then
                 mp.osd_message("Clip created successfully!\nSaved to: " .. filename, 5)
                 print("smartcut: Crop/Cut completed successfully.")
@@ -793,6 +828,12 @@ end
 
 -- OSD Menu Drawing function
 draw_menu = function()
+    if crop_mode_active then
+        menu_overlay.data = ""
+        menu_overlay:update()
+        return
+    end
+    
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
     local w, h = mp.get_osd_size()
     if w and h then
