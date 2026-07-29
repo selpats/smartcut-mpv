@@ -21,18 +21,64 @@ local profiles_file = mp.command_native({"expand-path", "~~/script-opts/smartcut
 
 local function load_profiles()
     local f = io.open(profiles_file, "r")
-    
-    if f then
-        local content = f:read("*all")
-        f:close()
-        local parsed, err = utils.parse_json(content)
-        if parsed then
-            profiles = parsed
-        else
-            print("smartcut: Failed to parse JSON profiles: " .. tostring(err))
-        end
-    else
+    if not f then
         print("smartcut: Error: Could not find smartcut_profiles.json in script-opts!")
+        return
+    end
+
+    local content = f:read("*all")
+    f:close()
+    
+    local parsed, err = utils.parse_json(content)
+    if not parsed then
+        print("smartcut: Failed to parse JSON profiles: " .. tostring(err))
+        return
+    end
+
+    profiles = {}
+    local seen_ids = {}
+
+    for i, p in ipairs(parsed) do
+        local profile_errs = {}
+        
+        if type(p) ~= "table" then
+            table.insert(profile_errs, "not an object")
+        else
+            if type(p.id) ~= "string" then table.insert(profile_errs, "missing/invalid 'id'") end
+            if type(p.name) ~= "string" then table.insert(profile_errs, "missing/invalid 'name'") end
+            if p.type ~= "smartcut" and p.type ~= "ffmpeg" then table.insert(profile_errs, "invalid 'type'") end
+            if type(p.ext) ~= "string" then table.insert(profile_errs, "missing/invalid 'ext'") end
+            if p.args and type(p.args) ~= "table" then table.insert(profile_errs, "invalid 'args'") end
+            if p.mode then
+                if type(p.mode) ~= "string" or (p.mode ~= "smartcut" and p.mode ~= "keyframes") then
+                    table.insert(profile_errs, "invalid 'mode'")
+                end
+            end
+            if p.vf and type(p.vf) ~= "string" then table.insert(profile_errs, "invalid 'vf'") end
+
+            if type(p.id) == "string" then
+                if seen_ids[p.id] then
+                    table.insert(profile_errs, "duplicate id '" .. p.id .. "'")
+                else
+                    seen_ids[p.id] = true
+                end
+            end
+        end
+
+        if #profile_errs > 0 then
+            local pid = (type(p) == "table" and type(p.id) == "string") and p.id or ("#" .. tostring(i))
+            local err_msg = table.concat(profile_errs, ", ")
+            
+            if type(p) ~= "table" then p = {} end
+            p.id = (type(p.id) == "string" and p.id ~= "") and p.id or pid
+            p.name = (type(p.name) == "string" and p.name ~= "") and p.name or "Broken Profile"
+            p.broken = err_msg
+            
+            print("smartcut: Loaded broken profile '" .. p.id .. "': " .. err_msg)
+            table.insert(profiles, p)
+        else
+            table.insert(profiles, p)
+        end
     end
 end
 
@@ -61,19 +107,37 @@ local menu_active = false
 local menu_options = {}
 local menu_sel = 1
 
+local active_renders = 0
+
 local function show_render_progress(text)
+    active_renders = active_renders + 1
     local w, h = mp.get_osd_size()
     if w and h then
         render_overlay.res_x = w
         render_overlay.res_y = h
-        render_overlay.data = "{\\an9\\pos(" .. (w - 25) .. ",25)\\fs24\\b1\\1c&HFFFFFF&}⏳ " .. text
+        local msg = text
+        if active_renders > 1 then
+            msg = msg .. " (+" .. (active_renders - 1) .. " more)"
+        end
+        render_overlay.data = "{\\an9\\pos(" .. (w - 25) .. ",25)\\fs24\\b1\\1c&HFFFFFF&}⏳ " .. msg
         render_overlay:update()
     end
 end
 
 local function hide_render_progress()
-    render_overlay.data = ""
-    render_overlay:update()
+    active_renders = math.max(0, active_renders - 1)
+    if active_renders == 0 then
+        render_overlay.data = ""
+        render_overlay:update()
+    else
+        local w, h = mp.get_osd_size()
+        if w and h then
+            render_overlay.res_x = w
+            render_overlay.res_y = h
+            render_overlay.data = "{\\an9\\pos(" .. (w - 25) .. ",25)\\fs24\\b1\\1c&HFFFFFF&}⏳ " .. active_renders .. " render(s) in progress..."
+            render_overlay:update()
+        end
+    end
 end
 
 local draw_menu
@@ -82,6 +146,15 @@ local check_active_state
 local cancel_all
 local undo_timecode
 local set_osc_visibility
+local refresh_ui
+
+local function check_config()
+    if #profiles == 0 then
+        mp.osd_message("Error: No profiles loaded! Check smartcut_profiles.json", 5)
+        return false
+    end
+    return true
+end
 
 local function get_home()
     return os.getenv("USERPROFILE") or os.getenv("HOME") or "."
@@ -105,7 +178,7 @@ local function ensure_dir(dir)
         mp.command_native({
             name = "subprocess",
             playback_only = false,
-            args = {"powershell", "-NoProfile", "-Command", "New-Item -ItemType Directory -Force -Path '" .. dir .. "'"}
+            args = {"cmd", "/c", "mkdir", dir:gsub("/", "\\")}
         })
     else
         -- Unix / Linux / macOS
@@ -122,14 +195,11 @@ local function format_time(seconds)
     local h = math.floor(seconds / 3600)
     local m = math.floor((seconds % 3600) / 60)
     local s = math.floor(seconds % 60)
-    local ms = math.floor((seconds % 1) * 1000)
+    local ms = math.floor((seconds * 1000) % 1000)
     return string.format("%02d:%02d:%02d.%03d", h, m, s, ms)
 end
 
 local function update_time_overlay()
-    if menu_active or crop_mode_active then
-        return
-    end
     if not start_time then
         menu_overlay.data = ""
         menu_overlay:update()
@@ -144,6 +214,17 @@ local function update_time_overlay()
     
     menu_overlay.data = ass
     menu_overlay:update()
+end
+
+refresh_ui = function()
+    if crop_mode_active then
+        menu_overlay.data = ""
+        menu_overlay:update()
+    elseif menu_active then
+        draw_menu()
+    else
+        update_time_overlay()
+    end
 end
 
 check_active_state = function()
@@ -168,8 +249,6 @@ cancel_all = function()
         mp.remove_key_binding("menu-up")
         mp.remove_key_binding("menu-down")
         mp.remove_key_binding("menu-enter")
-        menu_overlay.data = ""
-        menu_overlay:update()
     end
     
     if crop_mode_active or screen_x1 then
@@ -189,7 +268,7 @@ cancel_all = function()
     start_time = nil
     end_time = nil
     
-    update_time_overlay()
+    refresh_ui()
     check_active_state()
 end
 
@@ -199,8 +278,7 @@ undo_timecode = function()
     elseif start_time then
         start_time = nil
     end
-    update_time_overlay()
-    if menu_active then draw_menu() end
+    refresh_ui()
     check_active_state()
 end
 
@@ -298,18 +376,28 @@ local function draw_crop_box(x1, y1, x2, y2)
     overlay:update()
 end
 
-local function mouse_move()
-    if not first_point_set then return end
-    local mx, my = mp.get_mouse_pos()
-    draw_crop_box(drag_start_x, drag_start_y, mx, my)
-end
+
+local original_osd_level = nil
+local restore_osd_timer = nil
 
 set_osc_visibility = function(mode)
-    local current_level = mp.get_property("osd-level")
+    if not original_osd_level then
+        original_osd_level = mp.get_property("osd-level")
+    end
+    
     mp.set_property("osd-level", 0)
     mp.commandv("script-message", "osc-visibility", mode)
-    mp.add_timeout(0.05, function()
-        mp.set_property("osd-level", current_level)
+    
+    if restore_osd_timer then
+        restore_osd_timer:kill()
+    end
+    
+    restore_osd_timer = mp.add_timeout(0.05, function()
+        if original_osd_level then
+            mp.set_property("osd-level", original_osd_level)
+            original_osd_level = nil
+        end
+        restore_osd_timer = nil
     end)
 end
 
@@ -348,17 +436,15 @@ local function click_handler()
         -- Restore OSC visibility silently
         set_osc_visibility("auto")
         
-        if menu_active then
-            update_menu_options()
-            draw_menu()
-        else
-            update_time_overlay()
-        end
+        update_menu_options()
+        refresh_ui()
         check_active_state()
     end
 end
 
 local function toggle_crop_mode()
+    if not check_config() then return end
+
     if not crop_mode_active then
         -- If a crop area is already drawn, just clear it and don't enter crop mode yet
         if screen_x1 then
@@ -366,10 +452,8 @@ local function toggle_crop_mode()
             overlay.data = ""
             overlay:update()
             
-            if menu_active then
-                update_menu_options()
-                draw_menu()
-            end
+            update_menu_options()
+            refresh_ui()
             check_active_state()
             return
         end
@@ -378,9 +462,8 @@ local function toggle_crop_mode()
         first_point_set = false
         mp.add_forced_key_binding("mbtn_left", "smartcut-click", click_handler)
         
-        menu_overlay.data = ""
-        menu_overlay:update()
-        
+        update_menu_options()
+        refresh_ui()
         check_active_state()
         
         -- Hide the default On-Screen Controller (OSC) completely and silently
@@ -409,22 +492,20 @@ local function toggle_crop_mode()
         overlay:update()
         screen_x1, screen_y1, screen_x2, screen_y2 = nil, nil, nil, nil
         
-        -- Restore OSC visibility silently
         set_osc_visibility("auto")
         
-        if menu_active then
-            update_menu_options()
-            draw_menu()
-        else
-            update_time_overlay()
-        end
+        update_menu_options()
+        refresh_ui()
         
         check_active_state()
     end
 end
 
 -- Key binding to toggle start/end timecodes
+
 local function mark_time()
+    if not check_config() then return end
+
     local pos = mp.get_property_number("time-pos")
     if not pos then
         mp.osd_message("Error: Could not get current position")
@@ -441,15 +522,12 @@ local function mark_time()
         if pos <= start_time then
             mp.osd_message("Error: End time must be after start time", 3)
             return
+        else
+            end_time = pos
         end
-        end_time = pos
     end
     
-    update_time_overlay()
-    
-    if menu_active then
-        draw_menu()
-    end
+    refresh_ui()
     check_active_state()
 end
 
@@ -463,36 +541,19 @@ local function escape_filter_path(path)
     return path
 end
 
--- Retrieve active video track FFmpeg index
-local function get_active_video_info()
-    local vid = mp.get_property("vid")
-    if not vid or vid == "no" or vid == "auto" then return nil end
-    vid = tonumber(vid)
-    if not vid then return nil end
+-- Retrieve active track FFmpeg index by type ("video" or "audio")
+local function get_active_track_ff_index(track_type)
+    local prop = (track_type == "video") and "vid" or "aid"
+    local tid = mp.get_property(prop)
+    if not tid or tid == "no" or tid == "auto" then return nil end
+    tid = tonumber(tid)
+    if not tid then return nil end
 
     local track_list = mp.get_property_native("track-list")
     if not track_list then return nil end
 
     for _, track in ipairs(track_list) do
-        if track.type == "video" and track.id == vid then
-            return track["ff-index"]
-        end
-    end
-    return nil
-end
-
--- Retrieve active audio track FFmpeg index
-local function get_active_audio_info()
-    local aid = mp.get_property("aid")
-    if not aid or aid == "no" or aid == "auto" then return nil end
-    aid = tonumber(aid)
-    if not aid then return nil end
-
-    local track_list = mp.get_property_native("track-list")
-    if not track_list then return nil end
-
-    for _, track in ipairs(track_list) do
-        if track.type == "audio" and track.id == aid then
+        if track.type == track_type and track.id == tid then
             return track["ff-index"]
         end
     end
@@ -544,6 +605,30 @@ local function get_active_sub_info()
     return nil
 end
 
+local function execute_render(args, filename, msg)
+    cancel_all()
+    show_render_progress(msg)
+
+    mp.command_native_async({
+        name = "subprocess",
+        playback_only = false,
+        args = args
+    }, function(success, result, error)
+        hide_render_progress()
+        if success and result and result.status == 0 then
+            mp.osd_message("Clip created successfully!\nSaved to: " .. filename, 5)
+            print("smartcut: Render completed successfully.")
+        else
+            local err_msg = "Error creating clip!"
+            if result and result.stderr then
+                err_msg = err_msg .. "\n" .. result.stderr
+            end
+            mp.osd_message(err_msg, 7)
+            print("smartcut: Render failed. Status: " .. (result and result.status or "nil") .. ", Error: " .. (error or "nil"))
+        end
+    end)
+end
+
 -- Actual render execution logic
 local function run_render(profile_id)
     local profile = nil
@@ -551,9 +636,10 @@ local function run_render(profile_id)
         if p.id == profile_id then profile = p; break end
     end
     if not profile then
-        mp.osd_message("Error: Profile not found", 3)
+        mp.osd_message("Error: Profile '" .. tostring(profile_id) .. "' not found. Check config!", 5)
         return
     end
+
 
     local input_path = mp.get_property("path")
     if not input_path or input_path == "" then
@@ -571,17 +657,23 @@ local function run_render(profile_id)
 
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
 
+    local ext = profile.ext
+    if ext == "auto" then
+        ext = input_path:match("^.+(%.[^.]+)$") or ".mkv"
+    elseif ext:sub(1,1) ~= "." then
+        ext = "." .. ext
+    end
+    local output_dir = resolve_path(opts.output_dir)
+    ensure_dir(output_dir)
+    local filename = os.date(opts.filename_template) .. ext
+    local output_path = output_dir .. "/" .. filename
+
+    local mute = mp.get_property_native("mute")
+    local vol = mp.get_property_number("volume")
+    local aid_prop = mp.get_property_native("aid")
+    local drop_audio = (mute == true) or (vol and vol <= 0) or (aid_prop == "no" or aid_prop == false or aid_prop == nil)
+
     if profile.type == "smartcut" then
-        local ext = profile.ext
-        if ext == "auto" then
-            ext = input_path:match("^.+(%.[^.]+)$") or ".mkv"
-        else
-            ext = "." .. ext
-        end
-        local output_dir = resolve_path(opts.output_dir)
-        ensure_dir(output_dir)
-        local filename = os.date(opts.filename_template) .. ext
-        local output_path = output_dir .. "/" .. filename
 
         local msg = "Rendering lossless clip (" .. profile.name .. ")..."
         print("smartcut: Running smartcut...")
@@ -602,12 +694,6 @@ local function run_render(profile_id)
             table.insert(args, profile.mode)
         end
 
-        local mute = mp.get_property_native("mute")
-        local vol = mp.get_property_number("volume")
-        local aid = mp.get_property_native("aid")
-        
-        local drop_audio = (mute == true) or (vol and vol <= 0) or (aid == "no" or aid == false or aid == nil)
-
         if drop_audio then
             table.insert(args, "-a")
             table.insert(args, "-1")
@@ -623,27 +709,7 @@ local function run_render(profile_id)
 
 
 
-        cancel_all()
-        show_render_progress(msg)
-
-        mp.command_native_async({
-            name = "subprocess",
-            playback_only = false,
-            args = args
-        }, function(success, result, error)
-            hide_render_progress()
-            if success and result and result.status == 0 then
-                mp.osd_message("Clip created successfully!\nSaved to: " .. filename, 5)
-                print("smartcut: Lossless clip completed successfully.")
-            else
-                local err_msg = "Error creating lossless clip!"
-                if result and result.stderr then
-                    err_msg = err_msg .. "\n" .. result.stderr
-                end
-                mp.osd_message(err_msg, 7)
-                print("smartcut: Smartcut failed. Status: " .. (result and result.status or "nil") .. ", Error: " .. (error or "nil"))
-            end
-        end)
+        execute_render(args, filename, msg)
     elseif profile.type == "ffmpeg" then
         -- FFmpeg crop or encode
         local rect = nil
@@ -669,11 +735,6 @@ local function run_render(profile_id)
                 return
             end
         end
-
-        local output_dir = resolve_path(opts.output_dir)
-        ensure_dir(output_dir)
-        local filename = os.date(opts.filename_template) .. "." .. profile.ext
-        local output_path = output_dir .. "/" .. filename
 
         -- Check for active subtitles to burn in
         local sub_info = get_active_sub_info()
@@ -708,29 +769,20 @@ local function run_render(profile_id)
         table.insert(args, input_path)
 
         -- Map correct streams
-        local ff_video_idx = get_active_video_info()
-        local ff_audio_idx = get_active_audio_info()
-
-        local mute = mp.get_property_native("mute")
-        local vol = mp.get_property_number("volume")
-        local aid_prop = mp.get_property_native("aid")
-        
-        local drop_audio = (mute == true) or (vol and vol <= 0) or (aid_prop == "no" or aid_prop == false or aid_prop == nil)
+        local ff_video_idx = get_active_track_ff_index("video")
+        local ff_audio_idx = get_active_track_ff_index("audio")
 
         if ff_video_idx then
             table.insert(args, "-map")
             table.insert(args, "0:" .. ff_video_idx)
         end
-        if ff_audio_idx and not drop_audio and profile.audio_args and #profile.audio_args > 0 then
+        if ff_audio_idx and not drop_audio then
             table.insert(args, "-map")
             table.insert(args, "0:" .. ff_audio_idx)
         end
 
         -- Format specific arguments
         local vf_items = {}
-        if profile.vf_prefix and profile.vf_prefix ~= "" then
-            table.insert(vf_items, profile.vf_prefix)
-        end
         
         if has_crop then
             table.insert(vf_items, "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
@@ -751,8 +803,8 @@ local function run_render(profile_id)
             table.insert(vf_items, "setpts=PTS-STARTPTS")
         end
         
-        if profile.vf_suffix and profile.vf_suffix ~= "" then
-            table.insert(vf_items, profile.vf_suffix)
+        if profile.vf and type(profile.vf) == "string" then
+            table.insert(vf_items, profile.vf)
         end
         
         if #vf_items > 0 then
@@ -760,14 +812,8 @@ local function run_render(profile_id)
             table.insert(args, table.concat(vf_items, ","))
         end
 
-        if profile.video_args then
-            for _, arg in ipairs(profile.video_args) do
-                table.insert(args, arg)
-            end
-        end
-        
-        if profile.audio_args and not drop_audio then
-            for _, arg in ipairs(profile.audio_args) do
+        if profile.args and type(profile.args) == "table" then
+            for _, arg in ipairs(profile.args) do
                 table.insert(args, arg)
             end
         end
@@ -776,64 +822,32 @@ local function run_render(profile_id)
 
         table.insert(args, output_path)
 
-        cancel_all()
-        show_render_progress(msg)
-
-        mp.command_native_async({
-            name = "subprocess",
-            playback_only = false,
-            args = args
-        }, function(success, result, error)
-            hide_render_progress()
-            if success and result and result.status == 0 then
-                mp.osd_message("Clip created successfully!\nSaved to: " .. filename, 5)
-                print("smartcut: Crop/Cut completed successfully.")
-            else
-                local err_msg = "Error creating cropped/cut clip!"
-                if result and result.stderr then
-                    err_msg = err_msg .. "\n" .. result.stderr
-                end
-                mp.osd_message(err_msg, 7)
-                print("smartcut: Crop/Cut failed. Status: " .. (result and result.status or "nil") .. ", Error: " .. (error or "nil"))
-            end
-        end)
+        execute_render(args, filename, msg)
     end
 end
 
 update_menu_options = function()
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
+    local def = has_crop and opts.default_crop_mode:lower() or opts.default_cut_mode:lower()
     menu_options = {}
-    if has_crop then
-        local def = opts.default_crop_mode:lower()
-        for _, p in ipairs(profiles) do
-            if p.type == "ffmpeg" then
-                table.insert(menu_options, p.id)
-            end
-        end
-        menu_sel = 1
-        for i, opt in ipairs(menu_options) do
-            if opt == def then menu_sel = i; break end
-        end
-    else
-        local def = opts.default_cut_mode:lower()
-        for _, p in ipairs(profiles) do
+    
+    for _, p in ipairs(profiles) do
+        if not has_crop or p.type == "ffmpeg" or p.broken then
             table.insert(menu_options, p.id)
         end
-        menu_sel = 1
-        for i, opt in ipairs(menu_options) do
-            if opt == def then menu_sel = i; break end
+    end
+    
+    menu_sel = 1
+    for i, opt in ipairs(menu_options) do
+        if opt == def then 
+            menu_sel = i
+            break 
         end
     end
 end
 
 -- OSD Menu Drawing function
 draw_menu = function()
-    if crop_mode_active then
-        menu_overlay.data = ""
-        menu_overlay:update()
-        return
-    end
-    
     local has_crop = (screen_x1 and screen_y1 and screen_x2 and screen_y2)
     local w, h = mp.get_osd_size()
     if w and h then
@@ -872,19 +886,27 @@ draw_menu = function()
         end
         local desc = profile and profile.name or opt_id
 
-        if i == menu_sel then
-            -- Selected item: Yellow accent, bold
-            ass = ass .. "{\\fs30\\1c&HFFDD00&\\b1}▶  " .. opt_id:upper() .. "  {\\fs22\\1c&HDDDDDD&\\b0}" .. desc .. "{\\1c&HFFFFFF&}\\N"
+        if profile and profile.broken then
+            if i == menu_sel then
+                ass = ass .. "{\\fs30\\1c&H0000FF&\\b1}▶  " .. opt_id:upper() .. "  {\\fs22\\1c&H0000AA&\\b0}[BROKEN] " .. desc .. "{\\1c&HFFFFFF&}\\N"
+            else
+                ass = ass .. "{\\fs28\\1c&H5555FF&}    " .. opt_id:upper() .. "  {\\fs20\\1c&H5555AA&}[BROKEN] " .. desc .. "{\\1c&HFFFFFF&}\\N"
+            end
         else
-            -- Unselected item: White
-            ass = ass .. "{\\fs28\\1c&HFFFFFF&}    " .. opt_id:upper() .. "  {\\fs20\\1c&H888888&}" .. desc .. "{\\1c&HFFFFFF&}\\N"
+            if i == menu_sel then
+                -- Selected item: Yellow accent, bold
+                ass = ass .. "{\\fs30\\1c&HFFDD00&\\b1}▶  " .. opt_id:upper() .. "  {\\fs22\\1c&HDDDDDD&\\b0}" .. desc .. "{\\1c&HFFFFFF&}\\N"
+            else
+                -- Unselected item: White
+                ass = ass .. "{\\fs28\\1c&HFFFFFF&}    " .. opt_id:upper() .. "  {\\fs20\\1c&H888888&}" .. desc .. "{\\1c&HFFFFFF&}\\N"
+            end
         end
     end
     
     -- Show disabled options if cropping
     if has_crop then
         for _, p in ipairs(profiles) do
-            if p.type ~= "ffmpeg" then
+            if p.type ~= "ffmpeg" and not p.broken then
                 ass = ass .. "{\\fs22\\1c&H555555&}    " .. p.id:upper() .. "  (Requires Full-Frame)\\N"
             end
         end
@@ -900,10 +922,8 @@ local function close_menu()
     mp.remove_key_binding("menu-up")
     mp.remove_key_binding("menu-down")
     mp.remove_key_binding("menu-enter")
-    menu_overlay.data = ""
-    menu_overlay:update()
     menu_active = false
-    update_time_overlay()
+    refresh_ui()
     check_active_state()
     print("smartcut: Menu closed.")
 end
@@ -914,7 +934,7 @@ local function menu_up()
     if menu_sel < 1 then
         menu_sel = #menu_options
     end
-    draw_menu()
+    refresh_ui()
 end
 
 local function menu_down()
@@ -923,22 +943,42 @@ local function menu_down()
     if menu_sel > #menu_options then
         menu_sel = 1
     end
-    draw_menu()
+    refresh_ui()
+end
+
+local function validate_render_ready()
+    if not check_config() then return false end
+    
+    if not start_time or not end_time then
+        mp.osd_message("Error: Set start and end times first!", 3)
+        return false
+    end
+    return true
 end
 
 local function menu_enter()
     if not menu_active then return end
-    if not start_time or not end_time then
-        mp.osd_message("Error: Set start and end times first!", 3)
+    if not validate_render_ready() then return end
+    local selected_format = menu_options[menu_sel]
+    
+    local profile = nil
+    for _, p in ipairs(profiles) do
+        if p.id == selected_format then profile = p; break end
+    end
+    
+    if profile and profile.broken then
+        mp.osd_message("Error: Profile '" .. profile.id .. "' is broken: " .. profile.broken, 5)
         return
     end
-    local selected_format = menu_options[menu_sel]
+
     close_menu()
     run_render(selected_format)
 end
 
 -- Key binding to toggle format selection menu
 local function toggle_menu()
+    if not check_config() then return end
+
     if menu_active then
         close_menu()
         return
@@ -947,7 +987,7 @@ local function toggle_menu()
     update_menu_options()
 
     menu_active = true
-    draw_menu()
+    refresh_ui()
 
     mp.add_forced_key_binding("UP", "menu-up", menu_up)
     mp.add_forced_key_binding("DOWN", "menu-down", menu_down)
@@ -963,8 +1003,7 @@ local function make_clip()
         return
     end
 
-    if not start_time or not end_time then
-        mp.osd_message("Error: Set start and end times first!", 3)
+    if not validate_render_ready() then
         return
     end
 
@@ -972,11 +1011,27 @@ local function make_clip()
     local target_format
     if has_crop then
         target_format = opts.default_crop_mode:lower()
-        if target_format == "smartcut" or target_format == "smartcut_mp4" then
+        local valid = false
+        for _, p in ipairs(profiles) do
+            if p.id == target_format and p.type == "ffmpeg" and not p.broken then
+                valid = true
+                break
+            end
+        end
+        if not valid then
             target_format = "mp4"
         end
     else
         target_format = opts.default_cut_mode:lower()
+    end
+
+    local profile = nil
+    for _, p in ipairs(profiles) do
+        if p.id == target_format then profile = p; break end
+    end
+    if profile and profile.broken then
+        mp.osd_message("Error: Profile '" .. profile.id .. "' is broken: " .. profile.broken, 5)
+        return
     end
 
     run_render(target_format)

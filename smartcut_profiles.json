@@ -30,17 +30,11 @@
         "name": "MP4 Video (H.264)",
         "type": "ffmpeg",
         "ext": "mp4",
-        "video_args": [
-            "-c:v",
-            "libx264",
-            "-crf",
-            "18",
-            "-preset",
-            "medium"
-        ],
-        "audio_args": [
-            "-c:a",
-            "copy"
+        "args": [
+            "-c:v", "libx264",
+            "-crf", "18",
+            "-preset", "medium",
+            "-c:a", "copy"
         ]
     },
     {
@@ -48,20 +42,13 @@
         "name": "MP4 Video (H.264, 720p)",
         "type": "ffmpeg",
         "ext": "mp4",
-        "vf_prefix": "scale=-2:'min(ih,720)'",
-        "video_args": [
-            "-c:v",
-            "libx264",
-            "-crf",
-            "18",
-            "-preset",
-            "medium",
-            "-movflags",
-            "+faststart"
-        ],
-        "audio_args": [
-            "-c:a",
-            "copy"
+        "vf": "scale=-2:'min(ih,720)'",
+        "args": [
+            "-c:v", "libx264",
+            "-crf", "18",
+            "-preset", "medium",
+            "-movflags", "+faststart",
+            "-c:a", "copy"
         ]
     },
     {
@@ -69,9 +56,8 @@
         "name": "GIF Animation",
         "type": "ffmpeg",
         "ext": "gif",
-        "vf_prefix": "fps=15,scale=-1:-1",
-        "vf_suffix": "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
-        "audio_args": [
+        "vf": "fps=15,scale=-1:-1,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+        "args": [
             "-an"
         ]
     },
@@ -80,15 +66,10 @@
         "name": "AVIF Video (SVT-AV1)",
         "type": "ffmpeg",
         "ext": "avif",
-        "video_args": [
-            "-c:v",
-            "libsvtav1",
-            "-crf",
-            "30",
-            "-preset",
-            "6"
-        ],
-        "audio_args": [
+        "args": [
+            "-c:v", "libsvtav1",
+            "-crf", "30",
+            "-preset", "6",
             "-an"
         ]
     }
