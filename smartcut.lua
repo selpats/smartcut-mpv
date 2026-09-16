@@ -585,14 +585,25 @@ local function get_active_sub_info()
     for _, track in ipairs(track_list) do
         if track.type == "sub" then
             if track.id == sid then
+                local is_image = (track.image == true) or
+                    (track.codec == "hdmv_pgs_subtitle") or
+                    (track.codec == "pgs") or
+                    (track.codec == "dvd_subtitle") or
+                    (track.codec == "dvd_sub") or
+                    (track.codec == "vobsub") or
+                    (track.codec == "dvb_subtitle") or
+                    (track.codec == "xsub")
+
                 if track.external then
                     return {
                         external = true,
+                        is_image = is_image,
                         filename = track["external-filename"]
                     }
                 else
                     return {
                         external = false,
+                        is_image = is_image,
                         si = internal_sub_idx
                     }
                 end
@@ -743,7 +754,9 @@ local function run_render(profile_id)
         if has_crop then
             msg = "Rendering cropped clip"
         end
-        if sub_info then msg = msg .. " with subtitles" end
+        if sub_info then
+            msg = msg .. " with subtitles"
+        end
         msg = msg .. " (" .. profile.name .. ")..."
         
         if has_crop then
@@ -757,59 +770,118 @@ local function run_render(profile_id)
         print("smartcut: Output: " .. output_path)
 
 
+        local is_bitmap_sub = sub_info and sub_info.is_image
+
         -- Construct ffmpeg arguments
         local args = { resolve_path(opts.ffmpeg_path), "-y", "-hide_banner", "-loglevel", "error" }
 
-        -- Time input arguments (placed before input for fast seeking)
-        table.insert(args, "-ss")
-        table.insert(args, tostring(start_time))
-        table.insert(args, "-to")
-        table.insert(args, tostring(end_time))
-        table.insert(args, "-i")
-        table.insert(args, input_path)
+        local accurate_seek = nil
+        local clip_duration = end_time - start_time
+
+        if is_bitmap_sub then
+            -- For bitmap subtitles, use hybrid seeking (fast seek to keyframe ~3s before start,
+            -- then accurate seek on decode) to ensure subtitles active at cut point are fully decoded
+            -- and aligned to frame 1.
+            local pre_roll = 3.0
+            local fast_seek = math.max(0, start_time - pre_roll)
+            accurate_seek = start_time - fast_seek
+
+            table.insert(args, "-ss")
+            table.insert(args, tostring(fast_seek))
+            table.insert(args, "-i")
+            table.insert(args, input_path)
+
+            if sub_info.external then
+                table.insert(args, "-ss")
+                table.insert(args, tostring(fast_seek))
+                table.insert(args, "-i")
+                table.insert(args, sub_info.filename)
+            end
+        else
+            -- Time input arguments (placed before input for fast seeking)
+            table.insert(args, "-ss")
+            table.insert(args, tostring(start_time))
+            table.insert(args, "-to")
+            table.insert(args, tostring(end_time))
+            table.insert(args, "-i")
+            table.insert(args, input_path)
+        end
 
         -- Map correct streams
         local ff_video_idx = get_active_track_ff_index("video")
         local ff_audio_idx = get_active_track_ff_index("audio")
 
-        if ff_video_idx then
-            table.insert(args, "-map")
-            table.insert(args, "0:" .. ff_video_idx)
-        end
-        if ff_audio_idx and not drop_audio then
-            table.insert(args, "-map")
-            table.insert(args, "0:" .. ff_audio_idx)
-        end
-
-        -- Format specific arguments
-        local vf_items = {}
-        
-        if has_crop then
-            table.insert(vf_items, "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
-        end
-        if sub_info then
-            local sub_filter = ""
-            if sub_info.external then
-                sub_filter = "subtitles='" .. escape_filter_path(sub_info.filename) .. "'"
-            else
-                sub_filter = "subtitles='" .. escape_filter_path(input_path) .. "':si=" .. sub_info.si
+        if is_bitmap_sub then
+            -- Bitmap subtitles (PGS, VobSub) must be burned via overlay filter
+            local filter_nodes = {}
+            local v_in = "0:" .. (ff_video_idx or "v")
+            local s_in = sub_info.external and "1:s:0" or ("0:s:" .. sub_info.si)
+            local current_label = "[v_sub]"
+            
+            table.insert(filter_nodes, "[" .. v_in .. "][" .. s_in .. "]overlay=eof_action=pass:repeatlast=0" .. current_label)
+            
+            if has_crop then
+                local next_label = "[v_crop]"
+                table.insert(filter_nodes, current_label .. "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y .. next_label)
+                current_label = next_label
             end
             
-            -- Fix subtitle sync: since we use -ss before -i, video frames start at PTS 0.
-            -- We temporarily shift the video timestamps forward by start_time so the subtitles
-            -- filter burns the correct text, then we normalize them back to 0.
-            table.insert(vf_items, "setpts=PTS+" .. tostring(start_time) .. "/TB")
-            table.insert(vf_items, sub_filter)
-            table.insert(vf_items, "setpts=PTS-STARTPTS")
-        end
-        
-        if profile.vf and type(profile.vf) == "string" then
-            table.insert(vf_items, profile.vf)
-        end
-        
-        if #vf_items > 0 then
-            table.insert(args, "-vf")
-            table.insert(args, table.concat(vf_items, ","))
+            if profile.vf and type(profile.vf) == "string" then
+                local next_label = "[v_custom]"
+                table.insert(filter_nodes, current_label .. profile.vf .. next_label)
+                current_label = next_label
+            end
+            
+            table.insert(args, "-filter_complex")
+            table.insert(args, table.concat(filter_nodes, ";"))
+            
+            table.insert(args, "-map")
+            table.insert(args, current_label)
+            
+            if ff_audio_idx and not drop_audio then
+                table.insert(args, "-map")
+                table.insert(args, "0:" .. ff_audio_idx)
+            end
+        else
+            if ff_video_idx then
+                table.insert(args, "-map")
+                table.insert(args, "0:" .. ff_video_idx)
+            end
+            if ff_audio_idx and not drop_audio then
+                table.insert(args, "-map")
+                table.insert(args, "0:" .. ff_audio_idx)
+            end
+
+            -- Format specific arguments
+            local vf_items = {}
+            
+            if has_crop then
+                table.insert(vf_items, "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
+            end
+            if sub_info then
+                local sub_filter = ""
+                if sub_info.external then
+                    sub_filter = "subtitles='" .. escape_filter_path(sub_info.filename) .. "'"
+                else
+                    sub_filter = "subtitles='" .. escape_filter_path(input_path) .. "':si=" .. sub_info.si
+                end
+                
+                -- Fix subtitle sync: since we use -ss before -i, video frames start at PTS 0.
+                -- We temporarily shift the video timestamps forward by start_time so the subtitles
+                -- filter burns the correct text, then we normalize them back to 0.
+                table.insert(vf_items, "setpts=PTS+" .. tostring(start_time) .. "/TB")
+                table.insert(vf_items, sub_filter)
+                table.insert(vf_items, "setpts=PTS-STARTPTS")
+            end
+            
+            if profile.vf and type(profile.vf) == "string" then
+                table.insert(vf_items, profile.vf)
+            end
+            
+            if #vf_items > 0 then
+                table.insert(args, "-vf")
+                table.insert(args, table.concat(vf_items, ","))
+            end
         end
 
         if profile.args and type(profile.args) == "table" then
@@ -818,7 +890,12 @@ local function run_render(profile_id)
             end
         end
 
-
+        if is_bitmap_sub and accurate_seek then
+            table.insert(args, "-ss")
+            table.insert(args, tostring(accurate_seek))
+            table.insert(args, "-t")
+            table.insert(args, tostring(clip_duration))
+        end
 
         table.insert(args, output_path)
 
