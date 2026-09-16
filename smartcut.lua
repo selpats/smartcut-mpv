@@ -788,12 +788,16 @@ local function run_render(profile_id)
 
             table.insert(args, "-ss")
             table.insert(args, tostring(fast_seek))
+            table.insert(args, "-to")
+            table.insert(args, tostring(end_time))
             table.insert(args, "-i")
             table.insert(args, input_path)
 
             if sub_info.external then
                 table.insert(args, "-ss")
                 table.insert(args, tostring(fast_seek))
+                table.insert(args, "-to")
+                table.insert(args, tostring(end_time))
                 table.insert(args, "-i")
                 table.insert(args, sub_info.filename)
             end
