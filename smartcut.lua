@@ -1,6 +1,7 @@
 -- smartcut.lua - MPV script for lossless video cutting (smartcut) and cropped clips (FFmpeg) with OSD Menu
 local options = require 'mp.options'
 local utils = require 'mp.utils'
+local msg = require 'mp.msg'
 
 -- Default options
 local opts = {
@@ -93,6 +94,8 @@ local screen_x2 = nil
 local screen_y2 = nil
 
 local crop_mode_active = false
+local area_screenshot_active = false
+local area_screenshot_mode = "subtitles"
 local first_point_set = false
 local drag_start_x = nil
 local drag_start_y = nil
@@ -217,7 +220,7 @@ local function update_time_overlay()
 end
 
 refresh_ui = function()
-    if crop_mode_active then
+    if crop_mode_active or area_screenshot_active then
         menu_overlay.data = ""
         menu_overlay:update()
     elseif menu_active then
@@ -228,7 +231,7 @@ refresh_ui = function()
 end
 
 check_active_state = function()
-    local is_active = start_time or menu_active or crop_mode_active or screen_x1
+    local is_active = start_time or menu_active or crop_mode_active or screen_x1 or area_screenshot_active
     
     if is_active then
         mp.add_forced_key_binding("ESC", "smartcut-cancel", cancel_all)
@@ -251,6 +254,20 @@ cancel_all = function()
         mp.remove_key_binding("menu-enter")
     end
     
+    if area_screenshot_active then
+        area_screenshot_active = false
+        first_point_set = false
+        if drag_timer then
+            drag_timer:kill()
+            drag_timer = nil
+        end
+        mp.remove_key_binding("smartcut-click")
+        mp.remove_key_binding("smartcut-area-cancel")
+        overlay.data = ""
+        overlay:update()
+        set_osc_visibility("auto")
+    end
+
     if crop_mode_active or screen_x1 then
         crop_mode_active = false
         first_point_set = false
@@ -444,6 +461,9 @@ end
 
 local function toggle_crop_mode()
     if not check_config() then return end
+    if area_screenshot_active then
+        cancel_all()
+    end
 
     if not crop_mode_active then
         -- If a crop area is already drawn, just clear it and don't enter crop mode yet
@@ -1118,7 +1138,156 @@ local function make_clip()
     run_render(target_format)
 end
 
+local capture_area_to_clipboard
+
+local function capture_to_clipboard(mode, is_area_or_crop_x, crop_y, crop_w, crop_h)
+    if is_area_or_crop_x == true then
+        return capture_area_to_clipboard(mode)
+    end
+
+    local crop_x = (type(is_area_or_crop_x) == "number") and is_area_or_crop_x or nil
+    mode = mode or "video"
+    local time = mp.get_time()
+    local pipe_path = "\\\\.\\pipe\\mpv_copy2clip_" .. tostring(time) .. ".png"
+    local flag_file = os.getenv("TEMP") .. "\\mpv_copy2clip_ready_" .. tostring(time) .. ".tmp"
+    local exe_path = mp.command_native({"expand-path", "~~/script-opts/copy2clip.exe"})
+    
+    local args = {exe_path, pipe_path, flag_file}
+    if crop_x and crop_y and crop_w and crop_h then
+        table.insert(args, tostring(crop_x))
+        table.insert(args, tostring(crop_y))
+        table.insert(args, tostring(crop_w))
+        table.insert(args, tostring(crop_h))
+    end
+
+    mp.command_native_async({
+        name = "subprocess",
+        playback_only = false,
+        args = args
+    }, function(success, res, error)
+        if success and res.status == 0 then
+            mp.osd_message("Copied to clipboard")
+        else
+            mp.osd_message("Failed to copy to clipboard")
+            msg.error("Failed to copy: " .. tostring(error or (res and res.error_string)))
+        end
+    end)
+
+    local attempts = 0
+    local function check_ready()
+        attempts = attempts + 1
+        local f = io.open(flag_file, "r")
+        if f then
+            f:close()
+            os.remove(flag_file)
+            mp.commandv("screenshot-to-file", pipe_path, mode)
+        elseif attempts < 50 then
+            mp.add_timeout(0.01, check_ready)
+        else
+            mp.osd_message("Screenshot failed: Timeout")
+        end
+    end
+    check_ready()
+end
+
+local function area_click_handler()
+    if not first_point_set then
+        -- First click: start drag
+        drag_start_x, drag_start_y = mp.get_mouse_pos()
+        first_point_set = true
+
+        if drag_timer then drag_timer:kill() end
+        drag_timer = mp.add_periodic_timer(1/60, function()
+            local mx, my = mp.get_mouse_pos()
+            draw_crop_box(drag_start_x, drag_start_y, mx, my)
+        end)
+    else
+        -- Second click: take screenshot of the selected area
+        if drag_timer then
+            drag_timer:kill()
+            drag_timer = nil
+        end
+        local mx, my = mp.get_mouse_pos()
+        local x1, y1 = drag_start_x, drag_start_y
+
+        area_screenshot_active = false
+        first_point_set = false
+
+        mp.remove_key_binding("smartcut-click")
+        mp.remove_key_binding("smartcut-area-cancel")
+        overlay.data = ""
+        overlay:update()
+        set_osc_visibility("auto")
+        check_active_state()
+
+        local rect = get_video_display_rect()
+        if not rect then
+            mp.osd_message("Error: Could not calculate video coordinates", 3)
+            return
+        end
+
+        local vx1, vy1 = screen_to_video(x1, y1, rect)
+        local vx2, vy2 = screen_to_video(mx, my, rect)
+
+        local crop_w = math.abs(vx2 - vx1)
+        local crop_h = math.abs(vy2 - vy1)
+        local crop_x = math.min(vx1, vx2)
+        local crop_y = math.min(vy1, vy2)
+
+        if crop_w < 2 or crop_h < 2 then
+            mp.osd_message("Screenshot cancelled: Area too small", 2)
+            return
+        end
+
+        capture_to_clipboard(area_screenshot_mode, crop_x, crop_y, crop_w, crop_h)
+    end
+end
+
+capture_area_to_clipboard = function(mode)
+    if not mp.get_property("path") then
+        mp.osd_message("Error: No file currently playing", 3)
+        return
+    end
+
+    if area_screenshot_active then
+        cancel_all()
+        return
+    end
+
+    if crop_mode_active or screen_x1 or menu_active then
+        cancel_all()
+    end
+
+    area_screenshot_mode = mode or "subtitles"
+    area_screenshot_active = true
+    first_point_set = false
+
+    mp.add_forced_key_binding("mbtn_left", "smartcut-click", area_click_handler)
+    mp.add_forced_key_binding("mbtn_right", "smartcut-area-cancel", cancel_all)
+
+    check_active_state()
+    set_osc_visibility("never")
+
+    local w, h = mp.get_osd_size()
+    if w and h then
+        overlay.res_x = w
+        overlay.res_y = h
+        overlay.data = string.format(
+            "{\\an7\\pos(0,0)\\1c&H000000&\\1a&H88&\\bord0\\p1}m 0 0 l %d 0 l %d %d l 0 %d l 0 0{\\p0}",
+            w, w, h, h
+        )
+        overlay:update()
+    end
+end
+
 mp.add_key_binding("x", "smartcut-mark", mark_time)
 mp.add_key_binding("r", "smartcut-crop", toggle_crop_mode)
 mp.add_key_binding("X", "smartcut-cut", make_clip)
 mp.add_key_binding("n", "smartcut-menu", toggle_menu)
+
+mp.add_key_binding(nil, "copy-video", function() capture_to_clipboard("video") end)
+mp.add_key_binding(nil, "copy-subtitles", function() capture_to_clipboard("subtitles") end)
+mp.add_key_binding(nil, "copy-area-subtitles", function() capture_area_to_clipboard("subtitles") end)
+mp.add_key_binding(nil, "copy-area-video", function() capture_area_to_clipboard("video") end)
+
+

@@ -1,0 +1,13 @@
+[package]
+name = "copy2clip-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arboard = "3.6.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[[bin]]
+name = "copy2clip"
+path = "src/main.rs"
+

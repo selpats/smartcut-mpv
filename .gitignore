@@ -1,0 +1,3 @@
+# Rust build artifacts
+copy2clip-rs/target/
+*.exe
