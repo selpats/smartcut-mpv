@@ -147,6 +147,8 @@ local draw_menu
 local update_menu_options
 local check_active_state
 local cancel_all
+local cancel_area_screenshot
+local cancel_crop_mode
 local undo_timecode
 local set_osc_visibility
 local refresh_ui
@@ -246,14 +248,7 @@ check_active_state = function()
     end
 end
 
-cancel_all = function()
-    if menu_active then
-        menu_active = false
-        mp.remove_key_binding("menu-up")
-        mp.remove_key_binding("menu-down")
-        mp.remove_key_binding("menu-enter")
-    end
-    
+cancel_area_screenshot = function()
     if area_screenshot_active then
         area_screenshot_active = false
         first_point_set = false
@@ -262,12 +257,13 @@ cancel_all = function()
             drag_timer = nil
         end
         mp.remove_key_binding("smartcut-click")
-        mp.remove_key_binding("smartcut-area-cancel")
         overlay.data = ""
         overlay:update()
         set_osc_visibility("auto")
     end
+end
 
+cancel_crop_mode = function()
     if crop_mode_active or screen_x1 then
         crop_mode_active = false
         first_point_set = false
@@ -281,6 +277,18 @@ cancel_all = function()
         overlay:update()
         set_osc_visibility("auto")
     end
+end
+
+cancel_all = function()
+    if menu_active then
+        menu_active = false
+        mp.remove_key_binding("menu-up")
+        mp.remove_key_binding("menu-down")
+        mp.remove_key_binding("menu-enter")
+    end
+    
+    cancel_area_screenshot()
+    cancel_crop_mode()
     
     start_time = nil
     end_time = nil
@@ -461,6 +469,7 @@ end
 
 local function toggle_crop_mode()
     if not check_config() then return end
+    local was_screenshot = area_screenshot_active
     if area_screenshot_active then
         cancel_all()
     end
@@ -498,6 +507,10 @@ local function toggle_crop_mode()
                 w, w, h, h
             )
             overlay:update()
+        end
+
+        if was_screenshot then
+            mp.osd_message("Crop mode: video clip", 2)
         end
 
     else
@@ -1214,7 +1227,6 @@ local function area_click_handler()
         first_point_set = false
 
         mp.remove_key_binding("smartcut-click")
-        mp.remove_key_binding("smartcut-area-cancel")
         overlay.data = ""
         overlay:update()
         set_osc_visibility("auto")
@@ -1244,26 +1256,50 @@ local function area_click_handler()
 end
 
 capture_area_to_clipboard = function(mode)
+    mode = mode or "subtitles"
     if not mp.get_property("path") then
         mp.osd_message("Error: No file currently playing", 3)
         return
     end
 
     if area_screenshot_active then
-        cancel_all()
-        return
+        if area_screenshot_mode == mode then
+            cancel_all()
+            return
+        else
+            area_screenshot_mode = mode
+            first_point_set = false
+            if drag_timer then
+                drag_timer:kill()
+                drag_timer = nil
+            end
+            local w, h = mp.get_osd_size()
+            if w and h then
+                overlay.res_x = w
+                overlay.res_y = h
+                overlay.data = string.format(
+                    "{\\an7\\pos(0,0)\\1c&H000000&\\1a&H88&\\bord0\\p1}m 0 0 l %d 0 l %d %d l 0 %d l 0 0{\\p0}",
+                    w, w, h, h
+                )
+                overlay:update()
+            end
+            local msg = (mode == "video") and "Screenshot: area (no subtitles)" or "Screenshot: area (subtitles)"
+            mp.osd_message(msg, 2)
+            return
+        end
     end
+
+    local was_crop = crop_mode_active or screen_x1
 
     if crop_mode_active or screen_x1 or menu_active then
         cancel_all()
     end
 
-    area_screenshot_mode = mode or "subtitles"
+    area_screenshot_mode = mode
     area_screenshot_active = true
     first_point_set = false
 
     mp.add_forced_key_binding("mbtn_left", "smartcut-click", area_click_handler)
-    mp.add_forced_key_binding("mbtn_right", "smartcut-area-cancel", cancel_all)
 
     check_active_state()
     set_osc_visibility("never")
@@ -1278,6 +1314,11 @@ capture_area_to_clipboard = function(mode)
         )
         overlay:update()
     end
+
+    if was_crop then
+        local msg = (mode == "video") and "Screenshot: area (no subtitles)" or "Screenshot: area (subtitles)"
+        mp.osd_message(msg, 2)
+    end
 end
 
 mp.add_key_binding("x", "smartcut-mark", mark_time)
@@ -1285,9 +1326,9 @@ mp.add_key_binding("r", "smartcut-crop", toggle_crop_mode)
 mp.add_key_binding("X", "smartcut-cut", make_clip)
 mp.add_key_binding("n", "smartcut-menu", toggle_menu)
 
-mp.add_key_binding(nil, "copy-video", function() capture_to_clipboard("video") end)
-mp.add_key_binding(nil, "copy-subtitles", function() capture_to_clipboard("subtitles") end)
-mp.add_key_binding(nil, "copy-area-subtitles", function() capture_area_to_clipboard("subtitles") end)
-mp.add_key_binding(nil, "copy-area-video", function() capture_area_to_clipboard("video") end)
+mp.add_key_binding("s", "copy-subtitles", function() capture_to_clipboard("subtitles") end)
+mp.add_key_binding("S", "copy-video", function() capture_to_clipboard("video") end)
+mp.add_key_binding("Alt+s", "copy-area-subtitles", function() capture_area_to_clipboard("subtitles") end)
+mp.add_key_binding("Alt+S", "copy-area-video", function() capture_area_to_clipboard("video") end)
 
 
