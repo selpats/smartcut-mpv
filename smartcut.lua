@@ -892,9 +892,6 @@ local function run_render(profile_id)
             -- Format specific arguments
             local vf_items = {}
             
-            if has_crop then
-                table.insert(vf_items, "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
-            end
             if sub_info then
                 local sub_filter = ""
                 if sub_info.external then
@@ -909,6 +906,10 @@ local function run_render(profile_id)
                 table.insert(vf_items, "setpts=PTS+" .. tostring(start_time) .. "/TB")
                 table.insert(vf_items, sub_filter)
                 table.insert(vf_items, "setpts=PTS-STARTPTS")
+            end
+
+            if has_crop then
+                table.insert(vf_items, "crop=" .. crop_w .. ":" .. crop_h .. ":" .. crop_x .. ":" .. crop_y)
             end
             
             if profile.vf and type(profile.vf) == "string" then
